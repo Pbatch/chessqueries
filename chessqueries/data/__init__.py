@@ -12,6 +12,7 @@ from chessqueries.data.base import (
     DatasetName,
     get_dataset,
 )
+from chessqueries.data.chesscam import ChessCam
 from chessqueries.data.chesscog import ChessCog
 from chessqueries.data.chessred import ChessReD
 from chessqueries.data.cvchess import CVChess, Viewpoint
@@ -21,6 +22,7 @@ from chessqueries.data.slcc import SLCC
 __all__ = [
     "BoardImageDataset",
     "BoardSample",
+    "ChessCam",
     "ChessCog",
     "ChessDataset",
     "ChessReD",

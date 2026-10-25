@@ -10,7 +10,7 @@ from typing import ClassVar
 
 import torch
 from torch.utils.data import Dataset
-from torchvision.io import read_image
+from torchvision.io import ImageReadMode, read_image
 
 from chessqueries.core import Board, Split
 
@@ -20,6 +20,7 @@ class DatasetName(str, Enum):
     CHESSCOG = "chesscog"
     CVCHESS = "cvchess"
     SLCC = "slcc"
+    CHESSCAM = "chesscam"
 
 
 @dataclass
@@ -109,6 +110,8 @@ class DatasetLoad:
 class BoardImageDataset(Dataset):
     """torch Dataset over `BoardSample`s. Returns ``(image[C,H,W] float,
     labels[64] long)``; the raw `BoardSample` is at ``ds.samples[i]``.
+    With ``uint8``, images stay uint8 RGB for augmentation on the GPU
+    (`chessqueries.data.gpu_augment`).
 
     Every dataset reuses it via `ChessDataset.torch_dataset`.
     """
@@ -118,17 +121,22 @@ class BoardImageDataset(Dataset):
         samples: list[BoardSample],
         transform=None,
         completeness: DatasetCompleteness | None = None,
+        uint8: bool = False,
     ) -> None:
         self.samples = samples
         self.transform = transform
         self.completeness = completeness
+        self.uint8 = uint8
 
     def __len__(self) -> int:
         return len(self.samples)
 
     def __getitem__(self, index: int):
         sample = self.samples[index]
-        img = read_image(str(sample.image_path)).float()
+        if self.uint8:
+            img = read_image(str(sample.image_path), mode=ImageReadMode.RGB)
+        else:
+            img = read_image(str(sample.image_path)).float()
         if self.transform is not None:
             img = self.transform(img)
         return img, torch.tensor(sample.board.labels, dtype=torch.long)
@@ -232,9 +240,10 @@ class ChessDataset(ABC):
         transform=None,
         *,
         allow_partial: bool = False,
+        uint8: bool = False,
     ) -> BoardImageDataset:
         loaded = self.load_with_report(split, allow_partial=allow_partial)
-        return BoardImageDataset(loaded.samples, transform, loaded.completeness)
+        return BoardImageDataset(loaded.samples, transform, loaded.completeness, uint8=uint8)
 
 
 def get_dataset(name: DatasetName) -> ChessDataset:

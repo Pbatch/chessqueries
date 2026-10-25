@@ -44,6 +44,10 @@ class Settings(BaseSettings):
     def cvchess_root(self) -> Path:
         return self.DATA_ROOT / "cvchess"
 
+    @property
+    def chesscam_root(self) -> Path:
+        return self.DATA_ROOT / "chesscam"
+
 
 @lru_cache(maxsize=1)
 def get_config() -> Settings:

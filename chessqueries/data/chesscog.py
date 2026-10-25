@@ -24,7 +24,10 @@ class ChessCog(ChessDataset):
         for json_path in sorted(split_dir.glob("*.json")):
             with open(json_path) as f:
                 ann = json.load(f)
-            img_path = json_path.with_suffix(".png")
+            # The renders ship as PNG; packed copies (scripts/pack_datasets.py) are shrunk to JPEG
+            img_path = json_path.with_suffix(".jpg")
+            if not img_path.is_file():
+                img_path = json_path.with_suffix(".png")
             samples.append(
                 BoardSample(
                     image_path=img_path,

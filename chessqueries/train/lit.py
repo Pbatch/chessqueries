@@ -10,6 +10,7 @@ from torch.utils.data import ConcatDataset, DataLoader
 
 from chessqueries.core import NUM_PIECES, Piece, Split
 from chessqueries.data.base import DatasetName, get_dataset
+from chessqueries.data.gpu_augment import GpuAugment, square_uint8
 from chessqueries.data.transforms import Augment, Normalization, build_transform
 from chessqueries.metrics import aggregate
 from chessqueries.models.chessred_resnext import ChessReDResNeXt
@@ -93,11 +94,15 @@ class JointDataModule(pl.LightningDataModule):
 
     Sources must have an official TRAIN/VAL split (ChessReD, ChessCog). Held-out
     distributions (e.g. CVChess) are deliberately excluded so they stay a clean
-    zero-shot generalization target."""
+    zero-shot generalization target.
+
+    With ``gpu_augment``, loader workers only decode and resize, and augmentation
+    plus normalization run on the GPU per batch (`chessqueries.data.gpu_augment`)."""
 
     def __init__(self, sources: tuple[DatasetName, ...], resolution: int, batch_size: int, workers: int,
                  augment: Augment | str = Augment.PHOTOMETRIC,
-                 normalization: Normalization = Normalization.IMAGENET) -> None:
+                 normalization: Normalization = Normalization.IMAGENET,
+                 gpu_augment: bool = False) -> None:
         super().__init__()
         self.sources = tuple(sources)
         self.resolution = resolution
@@ -105,6 +110,9 @@ class JointDataModule(pl.LightningDataModule):
         self.workers = workers
         self.augment = Augment(augment)  # unknown presets fail here, not mid-setup
         self.normalization = normalization
+        if gpu_augment and normalization is not Normalization.IMAGENET:
+            raise ValueError("GPU augmentation only implements ImageNet normalization")
+        self.gpu_augment = GpuAugment(self.augment) if gpu_augment else None
 
     def setup(self, stage: str | None = None) -> None:
         train_parts, val_parts = [], []
@@ -112,12 +120,23 @@ class JointDataModule(pl.LightningDataModule):
             ds = get_dataset(name)
             if Split.TRAIN not in ds.splits or Split.VAL not in ds.splits:
                 raise ValueError(f"{name.value} lacks TRAIN/VAL splits; cannot join-train on it.")
+            if self.gpu_augment is not None:
+                tf = square_uint8(self.resolution)
+                train_parts.append(ds.torch_dataset(Split.TRAIN, transform=tf, uint8=True))
+                val_parts.append(ds.torch_dataset(Split.VAL, transform=tf, uint8=True))
+                continue
             train_tf = build_transform(self.resolution, train=True, augment=self.augment, normalization=self.normalization)
             val_tf = build_transform(self.resolution, train=False, normalization=self.normalization)
             train_parts.append(ds.torch_dataset(Split.TRAIN, transform=train_tf))
             val_parts.append(ds.torch_dataset(Split.VAL, transform=val_tf))
         self.train_ds = ConcatDataset(train_parts)
         self.val_ds = ConcatDataset(val_parts)
+
+    def on_after_batch_transfer(self, batch, dataloader_idx: int):
+        if self.gpu_augment is None:
+            return batch
+        x, y = batch
+        return self.gpu_augment(x, train=self.trainer.training), y
 
     def train_dataloader(self) -> DataLoader:
         return DataLoader(

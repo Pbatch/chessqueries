@@ -106,6 +106,17 @@ optional = true
 anthropic = "^0.120"
 openai = "^2.0"
 
+# ---------------------------------------------------------------------------
+# Modal training — submit runs with scripts/train_chessqueries_modal.py and log
+# them to W&B (chessqueries/train/training_job.py). The Modal image pins its
+# own copy of the training dependencies; this group is the local side.
+# ---------------------------------------------------------------------------
+[tool.poetry.group.modal]
+optional = true
+[tool.poetry.group.modal.dependencies]
+modal = "1.6.2"
+wandb = "0.22.3"
+
 [tool.poetry.group.notebooks]
 optional = true
 [tool.poetry.group.notebooks.dependencies]
