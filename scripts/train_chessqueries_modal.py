@@ -1,25 +1,25 @@
 """Train ChessQueries with Lightning on Modal and export the best model to safetensors.
 
-Needs the local Modal tooling (`poetry install --with modal`), which also lets the launcher check
+Needs the local Modal tooling (`uv sync --group modal`), which also lets the launcher check
 the settings before submitting. Upload the packed datasets (scripts/pack_datasets.py) once:
 
     .venv/bin/modal volume put chessqueries-training dist/chessqueries-data.tar /datasets/chessqueries-data.tar
 
-then submit a run, which returns as soon as it is queued:
+then submit a run (DINOv3 ViT-S/16 at 448px by default), which returns as soon as it is queued:
 
-    .venv/bin/modal run --detach scripts/train_chessqueries_modal.py --run-name vitl-644-chesscam
+    .venv/bin/modal run --detach scripts/train_chessqueries_modal.py --run-name dinov3-s-448-chesscam
 
-Fine-tune released weights uploaded to the volume (the run's encoder and resolution must match
-them), or just score them on the test splits as a baseline with --evaluate-only:
+Fine-tune released weights uploaded to the volume (the run's encoder must match them; the
+resolution may differ), or just score them on the test splits as a baseline with --evaluate-only:
 
     .venv/bin/modal run --detach scripts/train_chessqueries_modal.py --run-name lite-ft \
-        --encoder vit_small_patch14_dinov2.lvd142m --unfreeze-epoch 0 \
+        --encoder vit_small_patch14_dinov2.lvd142m --resolution 644 --unfreeze-epoch 0 \
         --init-weights /weights/cq-vit-s-644-v4-seed2-safetensors-fp16-r2.safetensors
 
 Resume a stopped run from its last checkpoint with the same run name and settings:
 
-    .venv/bin/modal run --detach scripts/train_chessqueries_modal.py --run-name vitl-644-chesscam \
-        --resume-checkpoint /runs/vitl-644-chesscam/checkpoints/last.ckpt
+    .venv/bin/modal run --detach scripts/train_chessqueries_modal.py --run-name dinov3-s-448-chesscam \
+        --resume-checkpoint /runs/dinov3-s-448-chesscam/checkpoints/last.ckpt
 """
 
 import json
@@ -30,7 +30,7 @@ import modal
 
 app = modal.App("chessqueries-training")
 volume = modal.Volume.from_name("chessqueries-training", create_if_missing=True)
-# Versions match the local Poetry environment
+# Versions match the local uv environment (uv.lock)
 image = (
     modal.Image.debian_slim(python_version="3.12")
     .uv_pip_install(
@@ -42,12 +42,9 @@ image = (
         "safetensors==0.8.0",
         "wandb==0.22.3",
         "numpy==1.26.4",
-        "pandas==2.3.3",
         "pillow==10.4.0",
-        "pyyaml==6.0.2",
         "tqdm==4.68.3",
         "requests==2.34.2",
-        "python-chess==1.999",
         "pydantic==2.12.3",
         "pydantic-settings==2.14.2",
         "python-dotenv==1.2.2",
@@ -62,7 +59,7 @@ with image.imports():
 
 @app.cls(
     image=image,
-    gpu="A100-80GB",
+    gpu="H100",
     cpu=8,
     memory=16384,
     timeout=86400,
@@ -82,24 +79,26 @@ class ModalChessQueriesTrainer:
 @app.local_entrypoint()
 def main(  # noqa: PLR0913
     dataset: str = "/datasets/chessqueries-data.tar",
-    run_name: str = "vitl-644-chesscam",
+    run_name: str = "dinov3-s-448-chesscam",
     epochs: int = 45,
     batch_size: int = 16,
     lr_scaling: str = "sqrt",
     resume_checkpoint: str = "",
     precision: str = "bf16-mixed",
-    resolution: int = 644,
-    encoder: str = "vit_large_patch14_dinov2.lvd142m",
-    datasets: str = "chessred,chesscog,chesscam",
+    resolution: int = 448,
+    encoder: str = "vit_small_patch16_dinov3.lvd1689m",
+    datasets: str = "chessred,chesscog,chesscam,slcc",
     learning_rate: float = 1.4e-4,
     encoder_learning_rate: float = 1.4e-5,
     warmup_epochs: int = 3,
     unfreeze_epoch: int = 5,
     seed: int = 1,
     init_weights: str = "",
-    eval_datasets: str = "chesscam,chessred,chesscog",
+    eval_datasets: str = "chesscam,chessred,chesscog,slcc",
     gpu_augment: bool = True,
     evaluate_only: bool = False,
+    # Any Modal GPU type, e.g. A100-80GB
+    gpu: str = "H100",
     wandb_project: str = "chessqueries",
     wandb_entity: str = "",
 ) -> None:
@@ -131,7 +130,7 @@ def main(  # noqa: PLR0913
         raise ValueError("--evaluate-only scores --init-weights, so pass them")
     submission_dir = Path("data/modal-runs")
     submission_dir.mkdir(parents=True, exist_ok=True)
-    trainer = ModalChessQueriesTrainer()
+    trainer = ModalChessQueriesTrainer.with_options(gpu=gpu)()
     call = (trainer.evaluate if evaluate_only else trainer.train).spawn(config)
     dashboard_url = app.get_dashboard_url()
     print(f"Submitted training run: {run_name}")
@@ -143,6 +142,7 @@ def main(  # noqa: PLR0913
         "call_id": call.object_id,
         "dashboard_url": dashboard_url,
         "mode": "evaluate" if evaluate_only else "train",
+        "gpu": gpu,
         **config,
     }
     submission_path = submission_dir / f"{call.object_id}.json"

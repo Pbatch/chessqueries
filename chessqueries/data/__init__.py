@@ -16,7 +16,6 @@ from chessqueries.data.chesscam import ChessCam
 from chessqueries.data.chesscog import ChessCog
 from chessqueries.data.chessred import ChessReD
 from chessqueries.data.cvchess import CVChess, Viewpoint
-from chessqueries.data.fewshot import FewShotSplit, load_support
 from chessqueries.data.slcc import SLCC
 
 __all__ = [
@@ -34,7 +33,5 @@ __all__ = [
     "Viewpoint",
     "DATASET_REGISTRY",
     "DatasetName",
-    "FewShotSplit",
     "get_dataset",
-    "load_support",
 ]

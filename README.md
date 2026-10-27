@@ -29,29 +29,16 @@ ChessReD, ChessCog, and SLCC training splits:
 |---:|---:|---:|---:|
 | **99.5%** | **98.5%** | **87.1%** | **87.6%** |
 
-## Quick start
+## This repository
 
-ChessQueries requires Python 3.12 and [Poetry](https://python-poetry.org/).
-Install the visualizer and launch the local Gradio demo:
+This repository holds the code to train ChessQueries models (on Modal), evaluate
+them across ChessReD, ChessCog, ChessCam, SLCC and CVChess, and export them to
+LiteRT or ONNX for the browser. It requires Python 3.12 and
+[uv](https://docs.astral.sh/uv/). See [DEVELOPMENT.md](DEVELOPMENT.md) for the
+commands.
 
-```bash
-poetry install --with viz
-poetry run chessqueries-demo
-```
-
-You can also predict directly from one or more images:
-
-```bash
-poetry run chessqueries-predict photo.jpg --viz prediction.png
-```
-
-On first use, both commands download and verify the FP16 paper ViT-L
-[safetensors checkpoint](https://huggingface.co/joelseytre/chessqueries), then
-cache it under `checkpoints/release/`. CUDA runs in FP16; CPU uses the same
-download with FP32 arithmetic. Preprocessing stays FP32; the default batch size is one.
-
-For other checkpoints and their download instructions, see the Hugging Face
-pages for [paper models](https://huggingface.co/joelseytre/chessqueries) and
+For released checkpoints, see the Hugging Face pages for
+[paper models](https://huggingface.co/joelseytre/chessqueries) and
 [ChessQ Lite](https://huggingface.co/joelseytre/chessq-lite).
 
 ## Citation
@@ -79,15 +66,6 @@ pages for [paper models](https://huggingface.co/joelseytre/chessqueries) and
   their respective rights holders.
 
 Commercial use is not licensed.
-
-## Going further
-
-See [DEVELOPMENT.md](DEVELOPMENT.md) for repository layout, data preparation,
-training and evaluation commands, experiment utilities, and checks.
-
-See the [minimal reproduction guide](minimal_reproduction/README.md) for a
-self-contained implementation of the model, training, evaluation, and leakage
-checks used in the paper.
 
 ## Contact
 

@@ -73,9 +73,7 @@ def test_load_safetensors_rejects_missing_configuration(tmp_path):
         raise AssertionError("incomplete metadata was accepted")
 
 
-def test_fp16_loading_and_cpu_predictor_fallback(tmp_path, monkeypatch):
-    from chessqueries.models.predictor import Predictor
-
+def test_fp16_loading(tmp_path, monkeypatch):
     path = tmp_path / "model.safetensors"
     expected = torch.arange(6, dtype=torch.float16).reshape(2, 3)
     save_file({"weight": expected}, path, metadata=_metadata(precision="fp16"))
@@ -84,9 +82,6 @@ def test_fp16_loading_and_cpu_predictor_fallback(tmp_path, monkeypatch):
     model = checkpoint.load_safetensors_model(path)
     assert model.weight.dtype == torch.float16
     assert torch.equal(model.weight, expected)
-    predictor = Predictor.from_checkpoint(path, device="cpu")
-    assert predictor.model.weight.dtype == torch.float32
-    assert torch.equal(predictor.model.weight, expected.float())
 
 
 @pytest.mark.parametrize("precision", ["fp16", "unsupported"])

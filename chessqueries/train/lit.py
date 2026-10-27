@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+from enum import Enum
 
 import pytorch_lightning as pl
 import torch
@@ -13,16 +14,21 @@ from chessqueries.data.base import DatasetName, get_dataset
 from chessqueries.data.gpu_augment import GpuAugment, square_uint8
 from chessqueries.data.transforms import Augment, Normalization, build_transform
 from chessqueries.metrics import aggregate
-from chessqueries.models.chessred_resnext import ChessReDResNeXt
 from chessqueries.models.chessqueries_model import DEFAULT_ENCODER, ChessQueriesModel, HeadType
-from chessqueries.train.baseline_recipes import Optimizer, ResNeXtLoss, Schedule
+
+
+class Schedule(str, Enum):
+    NONE = "none"
+    COSINE = "cosine"  # warmup, then a cosine anneal to a floor (see _warmup_cosine_factor)
+
 
 # save_hyperparameters() pickles these str-enums into checkpoints; torch>=2.6
 # loads with weights_only=True by default and rejects any non-allowlisted
 # global, so checkpoints written since the enum refactors fail to load without
 # this. Plain-data enums, safe to unpickle by construction. Some checkpoints
-# predate the model-module rename, so map that serialized path to the new class.
+# predate module moves, so map those serialized paths to the current classes.
 LEGACY_HEAD_TYPE_PATH = "chessqueries.models.query_net.HeadType"
+LEGACY_SCHEDULE_PATH = "chessqueries.train.baseline_recipes.Schedule"
 torch.serialization.add_safe_globals(
     [
         Augment,
@@ -30,9 +36,8 @@ torch.serialization.add_safe_globals(
         HeadType,
         (HeadType, LEGACY_HEAD_TYPE_PATH),
         Normalization,
-        Optimizer,
-        ResNeXtLoss,
         Schedule,
+        (Schedule, LEGACY_SCHEDULE_PATH),
     ]
 )
 
@@ -41,21 +46,21 @@ EMPTY_CLASS = int(Piece.EMPTY)
 
 
 def _warmup_cosine_factor(
-    epoch: int, *, start_epoch: int, warmup_epochs: int, total_epochs: int, floor: float
+    step: int, *, start_step: int, warmup_steps: int, total_steps: int, floor: float
 ) -> float:
-    """Per-epoch LR multiplier in ``[floor, 1]`` for one param group.
+    """Per-step LR multiplier in ``[floor, 1]`` for one param group.
 
-    Zero until ``start_epoch`` (the group is frozen until then), then a linear
-    warmup over ``warmup_epochs``, then a cosine anneal to ``floor`` — a fraction
-    of the peak LR — by ``total_epochs``. ``start_epoch=0, warmup_epochs=0,
+    Zero until ``start_step`` (the group is frozen until then), then a linear
+    warmup over ``warmup_steps``, then a cosine anneal to ``floor`` — a fraction
+    of the peak LR — by ``total_steps``. ``start_step=0, warmup_steps=0,
     floor=0`` reproduces a plain cosine-to-zero schedule."""
-    if epoch < start_epoch:
+    if step < start_step:
         return 0.0
-    local = epoch - start_epoch
-    if warmup_epochs > 0 and local < warmup_epochs:
-        return (local + 1) / warmup_epochs
-    denom = max(1, total_epochs - start_epoch - warmup_epochs)
-    progress = min(1.0, (local - warmup_epochs) / denom)
+    local = step - start_step
+    if warmup_steps > 0 and local < warmup_steps:
+        return (local + 1) / warmup_steps
+    denom = max(1, total_steps - start_step - warmup_steps)
+    progress = min(1.0, (local - warmup_steps) / denom)
     return floor + (1.0 - floor) * 0.5 * (1.0 + math.cos(math.pi * progress))
 
 
@@ -260,72 +265,17 @@ class LitChessQueriesModel(_ValMetricsMixin, pl.LightningModule):
             )
             group_starts = [self.hparams.unfreeze_epoch, 0]  # (encoder, new)
         schedule = Schedule(self.hparams.lr_schedule)
-        if schedule is Schedule.STEP:
-            raise ValueError("LitChessQueriesModel supports Schedule.NONE or Schedule.COSINE")
         if schedule is not Schedule.COSINE:
             return opt
-        total, warm, floor = self.trainer.max_epochs, self.hparams.warmup_epochs, self.hparams.lr_floor
+        # Epoch settings become step counts, so warmups ramp per batch instead of jumping per epoch
+        steps_per_epoch = max(1, self.trainer.estimated_stepping_batches // self.trainer.max_epochs)
+        total = self.trainer.max_epochs * steps_per_epoch
+        warm, floor = self.hparams.warmup_epochs * steps_per_epoch, self.hparams.lr_floor
         lr_lambdas = [
-            (lambda start: lambda e: _warmup_cosine_factor(
-                e, start_epoch=start, warmup_epochs=warm, total_epochs=total, floor=floor))(s)
-            for s in group_starts
+            (lambda start: lambda s: _warmup_cosine_factor(
+                s, start_step=start, warmup_steps=warm, total_steps=total, floor=floor))(e * steps_per_epoch)
+            for e in group_starts
         ]
         sched = torch.optim.lr_scheduler.LambdaLR(opt, lr_lambda=lr_lambdas)
-        return {"optimizer": opt, "lr_scheduler": {"scheduler": sched, "interval": "epoch"}}
+        return {"optimizer": opt, "lr_scheduler": {"scheduler": sched, "interval": "step"}}
 
-
-class LitChessReDResNeXt(_ValMetricsMixin, pl.LightningModule):
-    """The ChessReD ResNeXt-101 baseline, trainable on our joint set. The loss
-    selects the comparison: ``BCE`` reproduces the authors' recipe exactly,
-    ``SOFTMAX_CE`` transplants V2's objective onto the same model. See
-    ``baseline_recipes`` for the full recipe bundles."""
-
-    def __init__(
-        self,
-        loss: ResNeXtLoss = ResNeXtLoss.BCE,
-        optimizer: Optimizer = Optimizer.ADAM,
-        lr: float = 1e-3,
-        weight_decay: float = 0.0,
-        schedule: Schedule = Schedule.STEP,
-        step_size: int = 100,
-        gamma: float = 0.1,
-        epochs: int = 200,
-        empty_weight: float = 1.0,
-    ) -> None:
-        super().__init__()
-        self.save_hyperparameters()
-        # Train from ImageNet init in our canonical Piece order (no class perm).
-        self.model = ChessReDResNeXt(pretrained=True)
-        w = torch.ones(NUM_CLASSES)
-        w[EMPTY_CLASS] = empty_weight
-        self.register_buffer("class_weight", w)
-        self._reset_val_buffers()
-
-    def forward(self, x):
-        return self.model(x).reshape(-1, 64, NUM_CLASSES)  # (B, 64, 13)
-
-    def _loss(self, logits, labels):
-        if self.hparams.loss is ResNeXtLoss.BCE:
-            # ChessReD-faithful: independent sigmoids vs the one-hot target.
-            target = nn.functional.one_hot(labels, NUM_CLASSES).float()
-            return nn.functional.binary_cross_entropy_with_logits(logits, target)
-        return nn.functional.cross_entropy(
-            logits.reshape(-1, NUM_CLASSES), labels.reshape(-1), weight=self.class_weight,
-        )
-
-    def training_step(self, batch, batch_idx):
-        x, y = batch
-        loss = self._loss(self(x), y)
-        self.log("train_loss", loss, prog_bar=True)
-        return loss
-
-    def configure_optimizers(self):
-        cls = torch.optim.AdamW if self.hparams.optimizer is Optimizer.ADAMW else torch.optim.Adam
-        opt = cls(self.model.parameters(), lr=self.hparams.lr, weight_decay=self.hparams.weight_decay)
-        if self.hparams.schedule is Schedule.STEP:
-            sched = torch.optim.lr_scheduler.StepLR(opt, step_size=self.hparams.step_size, gamma=self.hparams.gamma)
-            return {"optimizer": opt, "lr_scheduler": {"scheduler": sched, "interval": "epoch"}}
-        if self.hparams.schedule is Schedule.COSINE:
-            sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=self.trainer.max_epochs)
-            return {"optimizer": opt, "lr_scheduler": {"scheduler": sched, "interval": "epoch"}}
-        return opt

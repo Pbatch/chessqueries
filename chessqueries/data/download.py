@@ -1,4 +1,4 @@
-"""Dataset + checkpoint downloaders.
+"""Dataset downloaders.
 
 Each function is idempotent. File downloads use a ``.part`` path and become
 visible at their final path only after any available SHA-256 check succeeds.
@@ -30,25 +30,11 @@ CHESSRED_ANNOTATIONS_SHA256 = (
     "16e99d7e8535c0fc56507caa2aa5f7594d7ca076ebab3f5a432cfd4aa10668cc"
 )
 # We use the authors' offline-resized 1024x1024 images (Google Drive zip), not
-# the raw 3072x3072 4TU images: these are the exact inputs the released
-# checkpoint was trained on, the only ones that reproduce the paper, and what we
-# train our own models on too. See models/chessred_resnext.py and upstream issue
-# tmasouris/end-to-end-chess-recognition#5.
+# the raw 3072x3072 4TU images: these are the exact inputs the ChessReD baseline
+# was trained on, the only ones that reproduce the paper, and what we train our
+# own models on too. See upstream issue tmasouris/end-to-end-chess-recognition#5.
 CHESSRED_IMAGES_GDRIVE_ID = "1jxmFxjOy0qefdCZ_x3DMNtsvAK4LojEw"
-# Lightning checkpoint of the ResNeXt baseline (Google Drive).
-CHESSRED_CKPT_GDRIVE_ID = "1sEkIj5MrFncGnmHQt66o_huKjqoMkNQ3"
-CHESSRED_CKPT_SHA256 = "a37eec7d804254b68aa317efef8e720f43113a62ab21380a9b4c8bc8d1d3bded"
 CHESSRED_IMAGE_COUNT = sum(FROZEN_SAMPLE_COUNTS[DatasetName.CHESSRED].values())
-
-# --- ChessQueries model weights (project-controlled) --------------------- #
-RELEASE_CHECKPOINT_FILENAME = "chessqueries-vitl-644-safetensors-fp16-r1.safetensors"
-RELEASE_CHECKPOINT_URL = (
-    "https://huggingface.co/joelseytre/chessqueries/resolve/529059bd7f00c3b7d39ecdf6cc2fef5d039fc3cf/"
-    f"{RELEASE_CHECKPOINT_FILENAME}"
-)
-RELEASE_CHECKPOINT_SHA256 = (
-    "45edb69bf156f94299256fc51d1c75805f1de745ecfe34dc0615ef21265ab506"
-)
 
 # --- ChessCog (OSF) --------------------------------------------------------- #
 # Synthetic render dataset, OSF project "xf3ka". Stored as val.zip, test.zip and
@@ -62,33 +48,6 @@ CHESSCOG_SPLIT_COUNTS = {
 
 # --- CVChess (Google Drive folder) ----------------------------------------- #
 CVCHESS_GDRIVE_FOLDER_ID = "1lxS3GpYvDLU_1a9oqzIRlNmJUSYbmGZp"
-
-# The double-blind review export rewrites the project's Hugging Face account to
-# this placeholder namespace, which hosts nothing — downloads from it can only
-# fail. In the identified (public) tree no artifact ever points at it.
-ANONYMIZED_HF_NAMESPACE = "anonymous"
-
-
-def is_anonymized_placeholder(url_or_repo: str) -> bool:
-    """True when an artifact URL / repo id points at the review placeholder."""
-    return (
-        f"huggingface.co/{ANONYMIZED_HF_NAMESPACE}/" in url_or_repo
-        or url_or_repo.startswith(f"{ANONYMIZED_HF_NAMESPACE}/")
-    )
-
-
-class AnonymizedArtifactError(RuntimeError):
-    """A download failed because it points at the double-blind review placeholder."""
-
-    def __init__(self, artifact: str, workaround: str) -> None:
-        super().__init__(
-            f"Downloading the {artifact} failed because this is the anonymized review "
-            f"copy: the real Hugging Face repository would identify the authors, so the "
-            f"review export rewrites it to the '{ANONYMIZED_HF_NAMESPACE}' placeholder "
-            f"namespace, which hosts nothing. The artifact exists and is published with "
-            f"the de-anonymized code upon release. Until then: {workaround}"
-        )
-
 
 class _ArchiveValidationError(RuntimeError):
     """A downloaded archive is readable enough to inspect but is invalid."""
@@ -276,29 +235,6 @@ def download_chessred(dataroot: Path | None = None) -> Path:
     return dataroot
 
 
-def download_chessred_checkpoint(dest: Path | None = None) -> Path:
-    dest = dest or (get_config().CHECKPOINTS_ROOT / "chessred_resnext.ckpt")
-    return _download_gdrive(CHESSRED_CKPT_GDRIVE_ID, dest, CHESSRED_CKPT_SHA256)
-
-
-def download_release_checkpoint(dest: Path | None = None) -> Path:
-    """Download the exact V3 inference weights and verify their SHA-256."""
-    dest = dest or (
-        get_config().CHECKPOINTS_ROOT / "release" / RELEASE_CHECKPOINT_FILENAME
-    )
-    try:
-        return _download(RELEASE_CHECKPOINT_URL, dest, RELEASE_CHECKPOINT_SHA256)
-    except requests.HTTPError as exc:
-        if not is_anonymized_placeholder(RELEASE_CHECKPOINT_URL):
-            raise
-        raise AnonymizedArtifactError(
-            "released model checkpoint",
-            "train a checkpoint locally (README, 'Reproducing the paper') and "
-            "pass it to any entrypoint with --checkpoint (with --resolution "
-            "matching its training resolution).",
-        ) from exc
-
-
 def download_chesscog(dataroot: Path | None = None) -> Path:
     """Clone the OSF project and unpack val/test/train (train is split-zip)."""
     import subprocess
@@ -398,7 +334,7 @@ def download_cvchess(dataroot: Path | None = None) -> Path:
     return dataroot
 
 
-# Downloadable datasets (SLCC is built locally by `annotate`, not downloaded).
+# Downloadable datasets (SLCC is reconstructed with the upstream tooling, ChessCam built elsewhere).
 DATASETS = {
     DatasetName.CHESSRED: download_chessred,
     DatasetName.CHESSCOG: download_chesscog,

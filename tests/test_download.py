@@ -155,38 +155,3 @@ def test_chessred_removes_a_corrupt_unhashed_zip_before_retry(tmp_path, monkeypa
     assert downloads == [download.CHESSRED_IMAGES_GDRIVE_ID]
     assert (tmp_path / "images" / "one.jpg").read_bytes() == b"image"
     assert not archive.exists()
-
-
-def _failing_download(*args, **kwargs):
-    import requests
-
-    raise requests.HTTPError("401 Client Error: Unauthorized")
-
-
-def test_release_checkpoint_explains_anonymized_placeholder(tmp_path, monkeypatch):
-    """In the review export the URL points at anonymous/; the failure must say why."""
-    monkeypatch.setattr(
-        download,
-        "RELEASE_CHECKPOINT_URL",
-        "https://huggingface.co/anonymous/chessqueries/resolve/main/x.ckpt",
-    )
-    monkeypatch.setattr(download, "_download", _failing_download)
-
-    with pytest.raises(download.AnonymizedArtifactError, match="anonymized review copy"):
-        download.download_release_checkpoint(tmp_path / "x.ckpt")
-
-
-def test_release_checkpoint_reraises_real_http_errors(tmp_path, monkeypatch):
-    """From a non-placeholder host, an HTTP failure surfaces unchanged."""
-    import requests
-
-    # A neutral URL rather than the real constant: the review export rewrites
-    # the project's Hugging Face account to the placeholder everywhere,
-    # including in this test file, and the test must pass in both trees.
-    monkeypatch.setattr(
-        download, "RELEASE_CHECKPOINT_URL", "https://example.test/x.ckpt"
-    )
-    monkeypatch.setattr(download, "_download", _failing_download)
-
-    with pytest.raises(requests.HTTPError, match="401"):
-        download.download_release_checkpoint(tmp_path / "x.ckpt")

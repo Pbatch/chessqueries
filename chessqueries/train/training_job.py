@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tarfile
 import tempfile
 from collections.abc import Callable
@@ -32,8 +33,7 @@ from chessqueries.models.checkpoint import (
     read_safetensors_metadata,
 )
 from chessqueries.models.chessqueries_model import HeadType
-from chessqueries.train.baseline_recipes import Schedule
-from chessqueries.train.lit import JointDataModule, LitChessQueriesModel
+from chessqueries.train.lit import JointDataModule, LitChessQueriesModel, Schedule
 from chessqueries.train.training_logging import create_wandb_logger
 
 PRECISIONS = {"32-true", "16-mixed", "bf16-mixed"}
@@ -47,9 +47,10 @@ RESUME_FIXED = ("encoder", "resolution", "datasets", "head_type", "decoder_layer
 
 @dataclass(frozen=True, slots=True)
 class TrainingConfig:
-    """Defaults are the paper recipe (ViT-L/14 at 644px on ChessReD + ChessCog, plus ChessCam),
-    except the batch: the paper's 6 leaves an A100-80GB mostly idle, so it is 16 here, with the
-    paper's learning rates (given for batch 6) scaled by the square root of the batch ratio."""
+    """Defaults train DINOv3 ViT-S/16 at 448px, the browser model's size, on ChessReD + ChessCog +
+    ChessCam. The rest is the paper recipe (tuned for DINOv2 ViT-L/14 at 644px), except the batch:
+    the paper's 6 leaves an A100-80GB mostly idle, so it is 16 here, with the paper's learning
+    rates (given for batch 6) scaled by the square root of the batch ratio."""
 
     dataset: str
     run_name: str
@@ -58,9 +59,9 @@ class TrainingConfig:
     lr_scaling: str = "sqrt"
     resume_checkpoint: str = ""
     precision: str = "bf16-mixed"
-    resolution: int = 644
-    encoder: str = "vit_large_patch14_dinov2.lvd142m"
-    datasets: str = "chessred,chesscog,chesscam"
+    resolution: int = 448
+    encoder: str = "vit_small_patch16_dinov3.lvd1689m"
+    datasets: str = "chessred,chesscog,chesscam,slcc"
     learning_rate: float = 1.4e-4
     encoder_learning_rate: float = 1.4e-5
     weight_decay: float = 0.05
@@ -77,7 +78,7 @@ class TrainingConfig:
     # Start from released weights (a .safetensors on the volume) instead of DINOv2 alone
     init_weights: str = ""
     # Test splits the last weights are scored on after training
-    eval_datasets: str = "chesscam,chessred,chesscog"
+    eval_datasets: str = "chesscam,chessred,chesscog,slcc"
     wandb_project: str = "chessqueries"
     wandb_entity: str = ""
 
@@ -88,8 +89,8 @@ class TrainingConfig:
             raise ValueError("Use a simple run name")
         if self.precision not in PRECISIONS:
             raise ValueError(f"Precision must be one of {sorted(PRECISIONS)}")
-        if self.resolution % 14:
-            raise ValueError("Resolution must be a multiple of the 14px ViT patch size")
+        if self.resolution % self.patch_size():
+            raise ValueError(f"Resolution must be a multiple of the encoder's {self.patch_size()}px patch size")
         if not 0 < self.learning_rate < float("inf") or not 0 < self.encoder_learning_rate < float("inf"):
             raise ValueError("Learning rates must be positive and finite")
         if not 0 <= self.unfreeze_epoch < self.epochs:
@@ -100,6 +101,13 @@ class TrainingConfig:
         HeadType(self.head_type)
         self.sources()
         self.eval_sources()
+
+    def patch_size(self) -> int:
+        """From the timm name, e.g. 14 for DINOv2's vit_*_patch14_*, 16 for DINOv3's vit_*_patch16_*"""
+        match = re.search(r"patch(\d+)", self.encoder)
+        if match is None:
+            raise ValueError(f"Can't tell the patch size of {self.encoder}")
+        return int(match.group(1))
 
     def sources(self) -> tuple[DatasetName, ...]:
         return tuple(DatasetName(name.strip()) for name in self.datasets.split(",") if name.strip())
@@ -114,11 +122,11 @@ class TrainingConfig:
 
 
 def check_weights_match(path: Path, config: TrainingConfig) -> None:
-    """Released weights only load into a model built the same way"""
+    """Released weights only load into a model built the same way. Resolution may differ: the
+    encoder interpolates its position embeddings to any input size (dynamic_img_size)"""
     metadata = read_safetensors_metadata(path)
     expected = {
         "encoder_name": config.encoder,
-        "resolution": str(config.resolution),
         "head_type": config.head_type,
         "decoder_layers": str(config.decoder_layers),
     }
@@ -194,6 +202,12 @@ class ChessQueriesTrainingJob:
         changed = [key for key in RESUME_FIXED if saved.get(key) != getattr(self.config, key)]
         if changed:
             raise ValueError(f"Resume must keep the original {', '.join(changed)}")
+        # The LR schedule now steps per batch. A checkpoint from when it stepped per epoch counts
+        # epochs, so resuming it would restart the warmup from near zero
+        state = torch.load(checkpoint, map_location="cpu", mmap=True)
+        schedulers = state.get("lr_schedulers") or []
+        if schedulers and schedulers[0]["last_epoch"] != state["global_step"]:
+            raise ValueError(f"{checkpoint} has a per-epoch LR schedule, so it can't be resumed per batch")
 
     def init_weights_path(self) -> Path | None:
         if not self.config.init_weights:
@@ -255,6 +269,9 @@ class ChessQueriesTrainingJob:
             )
             if weights is not None:
                 model.model.load_state_dict(load_safetensors_model(weights).float().state_dict())
+            # About 1.2x faster steps after a compile of under a minute. In place, so state dict keys
+            # (and so checkpoints and exports) stay unchanged
+            model.model.compile()
             callback = VolumeCheckpoint(output, self.commit)
             wandb_logger = create_wandb_logger(
                 output, run_name=config.run_name, project=config.wandb_project, entity=config.wandb_entity or None
@@ -267,7 +284,7 @@ class ChessQueriesTrainingJob:
                 precision=config.precision,
                 gradient_clip_val=1.0,
                 log_every_n_steps=20,
-                callbacks=[callback, LearningRateMonitor(logging_interval="epoch")],
+                callbacks=[callback, LearningRateMonitor(logging_interval="step")],
                 logger=[CSVLogger(str(output), name="logs"), wandb_logger],
                 default_root_dir=output,
             )
@@ -280,7 +297,7 @@ class ChessQueriesTrainingJob:
                     "effective_encoder_learning_rate": config.encoder_learning_rate * config.lr_factor(),
                 })
                 trainer.fit(model, datamodule, ckpt_path=str(checkpoint) if checkpoint is not None else None)
-                # Tensor-only copies of the best and last weights, loadable by chessqueries-predict --checkpoint
+                # Tensor-only copies of the best and last weights, for scripts/eval_cross_dataset.py and the exporters
                 for kind, path in (("best", callback.best_model_path), ("last", callback.last_model_path)):
                     export_lightning_safetensors(Path(path), output / f"{kind}.safetensors",
                                                  resolution=config.resolution)

@@ -13,8 +13,6 @@ jobs:
     name: Lint and test (Python 3.12)
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    env:
-      POETRY_VIRTUALENVS_IN_PROJECT: "true"
     steps:
       - name: Check out the repository
         uses: actions/checkout@v4
@@ -26,32 +24,18 @@ jobs:
           sudo rm -rf /usr/local/lib/android
           df -h /
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
         with:
+          version: "0.11.22"
           python-version: "3.12"
 
-      - name: Install Poetry
-        run: pipx install poetry==2.2.1
-
-      - name: Cache the virtual environment
-        uses: actions/cache@v4
-        with:
-          path: .venv
-          key: ${{ runner.os }}-python-3.12-poetry-${{ hashFiles('poetry.lock') }}
-
       - name: Install test dependencies
-        run: poetry --no-cache install --with dev,viz,slcc,annotate,llm --no-interaction
+        run: >-
+          uv sync --locked --no-cache --group dev
 
       - name: Run Ruff without relying on Git metadata
-        run: poetry run ruff check .
-
-      - name: Validate SLCC metadata and synthetic reconstruction
-        run: >-
-          poetry run pytest -q
-          tests/test_slcc_release.py
-          tests/annotate/test_reconstruction_core.py
-          tests/annotate/test_public_reconstruction.py
+        run: uv run ruff check .
 
       - name: Run the test suite
-        run: poetry run pytest
+        run: uv run pytest

@@ -8,11 +8,11 @@ the headline metrics along a per-sample feature (e.g. crop resolution), so you
 can see where the model is weak without a second pass or re-scoring saved preds.
 
 Usage:
-    poetry run python scripts/eval_cross_dataset.py --checkpoint checkpoints/v0-finetune/last.ckpt \
+    uv run python scripts/eval_cross_dataset.py --checkpoint checkpoints/v0-finetune/last.ckpt \
         --dataset chesscog --split test
 
     # break test metrics down by crop pixel area (auto threshold = median):
-    poetry run python scripts/eval_cross_dataset.py --checkpoint .../last.ckpt \
+    uv run python scripts/eval_cross_dataset.py --checkpoint .../last.ckpt \
         --dataset slcc --split test --subset-by resolution
 """
 import argparse
@@ -36,7 +36,8 @@ from chessqueries.metrics.report import (
     write_eval_outputs,
 )
 from chessqueries.models.base import predict_all
-from chessqueries.models.predictor import Predictor
+from chessqueries.models.checkpoint import load_safetensors_model, read_safetensors_metadata
+from chessqueries.train.lit import LitChessQueriesModel
 
 
 def _resolution(sample) -> float:
@@ -47,6 +48,15 @@ def _resolution(sample) -> float:
 
 # Pluggable per-sample numeric features for --subset-by (closed set; extend here).
 SUBSET_FEATURES = {"resolution": _resolution}
+
+
+def _load_model(checkpoint: Path, device: str) -> torch.nn.Module:
+    """A .safetensors export (in its stored precision; FP32 on the CPU) or a Lightning .ckpt."""
+    if checkpoint.suffix == ".safetensors":
+        model = load_safetensors_model(checkpoint, device=device)
+        return model.float() if torch.device(device).type == "cpu" else model
+    lit = LitChessQueriesModel.load_from_checkpoint(str(checkpoint), map_location=device)
+    return lit.model.eval().to(device)
 
 
 def _quantile(values: list[float], f: float) -> float:
@@ -91,7 +101,8 @@ def main() -> None:
     p.add_argument("--split", default=None, choices=["train", "val", "test"])
     p.add_argument("--batch-size", type=int, default=32)
     p.add_argument("--workers", type=int, default=8)
-    p.add_argument("--resolution", type=int, default=518)
+    p.add_argument("--resolution", type=int, default=None,
+                   help="Input size; defaults to the one a .safetensors checkpoint was trained at.")
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--name", required=True, help="Run tag; names outputs/chessqueries_<name>.")
     p.add_argument(
@@ -109,6 +120,11 @@ def main() -> None:
     if not args.checkpoint.is_file():
         p.error(f"checkpoint not found: {args.checkpoint}")
 
+    if args.resolution is None:
+        if args.checkpoint.suffix != ".safetensors":
+            p.error("--resolution is required for a Lightning .ckpt (only .safetensors record theirs)")
+        args.resolution = int(read_safetensors_metadata(args.checkpoint)["resolution"])
+
     cfg = get_config()
     ds_obj = get_dataset(args.dataset)
     split = resolve_split(ds_obj, args.split)
@@ -122,9 +138,7 @@ def main() -> None:
     except DatasetIncompleteError as exc:
         p.error(str(exc))
 
-    model = Predictor.from_checkpoint(
-        args.checkpoint, resolution=args.resolution, device=args.device
-    ).model
+    model = _load_model(args.checkpoint, args.device)
     predicted = predict_all(model, ds, device=args.device, batch_size=args.batch_size,
                             workers=args.workers, desc=f"{args.dataset.value}[{split}]")
 

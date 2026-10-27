@@ -147,7 +147,7 @@ class SLCC(ChessDataset):
         if not self.manifest_path.is_file():
             raise FileNotFoundError(
                 f"SLCC manifest not found at {self.manifest_path}. "
-                "Build it with `python -m chessqueries.annotate.reconstruct`."
+                "Reconstruct SLCC with the upstream ChessQueries tooling (chessqueries.annotate.reconstruct)."
             )
         return json.loads(self.manifest_path.read_text())["samples"]
 

@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
+import torch
 
 pytest.importorskip("modal")
 pytest.importorskip("wandb")
@@ -26,21 +27,29 @@ def _load_launcher():
     return module
 
 
+def _trainer_class(trainer: Mock) -> Mock:
+    """A stand-in for the Modal class, whose with_options(...)() gives `trainer`"""
+    cls = Mock()
+    cls.with_options.return_value = Mock(return_value=trainer)
+    return cls
+
+
 def test_training_submission_saves_call_id_without_waiting(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     launcher = _load_launcher()
     monkeypatch.chdir(tmp_path)
     call = Mock(object_id="fc-test")
     trainer = Mock()
     trainer.train.spawn.return_value = call
-    monkeypatch.setattr(launcher, "ModalChessQueriesTrainer", Mock(return_value=trainer))
+    monkeypatch.setattr(launcher, "ModalChessQueriesTrainer", _trainer_class(trainer))
     monkeypatch.setattr(
         launcher,
         "app",
         Mock(app_id="ap-test", get_dashboard_url=Mock(return_value="https://modal.com/id/ap-test")),
     )
     launcher.main(run_name="vits-test", encoder="vit_small_patch14_dinov2.lvd142m", epochs=3, batch_size=16,
-                  unfreeze_epoch=1)
+                  unfreeze_epoch=1, gpu="H100")
 
+    launcher.ModalChessQueriesTrainer.with_options.assert_called_once_with(gpu="H100")
     trainer.train.spawn.assert_called_once()
     trainer.train.remote.assert_not_called()
     call.get.assert_not_called()
@@ -54,13 +63,14 @@ def test_training_submission_saves_call_id_without_waiting(tmp_path: Path, monke
     assert submission["encoder"] == "vit_small_patch14_dinov2.lvd142m"
     assert submission["epochs"] == 3
     assert submission["batch_size"] == 16
+    assert submission["gpu"] == "H100"
 
 
 def test_bad_settings_fail_before_submitting(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     launcher = _load_launcher()
     monkeypatch.chdir(tmp_path)
     trainer = Mock()
-    monkeypatch.setattr(launcher, "ModalChessQueriesTrainer", Mock(return_value=trainer))
+    monkeypatch.setattr(launcher, "ModalChessQueriesTrainer", _trainer_class(trainer))
     # Unfreezing at the default epoch 5 is impossible in a 3-epoch run
     with pytest.raises(ValueError, match="unfreeze"):
         launcher.main(run_name="short", epochs=3)
@@ -74,7 +84,7 @@ def test_bad_settings_fail_before_submitting(tmp_path: Path, monkeypatch: pytest
         {"run_name": "../escape"},
         {"epochs": 0},
         {"precision": "8-bit"},
-        {"resolution": 640},
+        {"resolution": 644},
         {"learning_rate": 0.0},
         {"unfreeze_epoch": 45},
         {"datasets": "chessred,imagenet"},
@@ -136,7 +146,11 @@ def test_init_weights_must_match_the_run(tmp_path: Path) -> None:
     job = ChessQueriesTrainingJob(TrainingConfig("/datasets/d.tar", "run", **lite), tmp_path, Mock())
     assert job.init_weights_path() == tmp_path / "weights" / "lite.safetensors"
 
-    # The default encoder is ViT-L, which the ViT-S weights can't fill
+    # 644px weights can be fine-tuned at another resolution
+    lower = ChessQueriesTrainingJob(TrainingConfig("/datasets/d.tar", "run", resolution=448, **lite), tmp_path, Mock())
+    assert lower.init_weights_path() == tmp_path / "weights" / "lite.safetensors"
+
+    # The default encoder is DINOv3, which the DINOv2 weights can't fill
     wrong = ChessQueriesTrainingJob(TrainingConfig("/datasets/d.tar", "run", init_weights=lite["init_weights"]),
                                     tmp_path, Mock())
     with pytest.raises(ValueError, match="encoder_name"):
@@ -153,7 +167,7 @@ def test_evaluate_only_submits_the_evaluation(tmp_path: Path, monkeypatch: pytes
     monkeypatch.chdir(tmp_path)
     trainer = Mock()
     trainer.evaluate.spawn.return_value = Mock(object_id="fc-eval")
-    monkeypatch.setattr(launcher, "ModalChessQueriesTrainer", Mock(return_value=trainer))
+    monkeypatch.setattr(launcher, "ModalChessQueriesTrainer", _trainer_class(trainer))
     monkeypatch.setattr(launcher, "app", Mock(app_id="ap", get_dashboard_url=Mock(return_value="url")))
 
     with pytest.raises(ValueError, match="init-weights"):
@@ -168,11 +182,11 @@ def test_evaluate_only_submits_the_evaluation(tmp_path: Path, monkeypatch: pytes
 def test_resume_refuses_changed_settings(tmp_path: Path) -> None:
     output = tmp_path / "runs" / "run"
     (output / "checkpoints").mkdir(parents=True)
-    (output / "checkpoints" / "last.ckpt").write_bytes(b"")
+    torch.save({"global_step": 40, "lr_schedulers": [{"last_epoch": 40}]}, output / "checkpoints" / "last.ckpt")
     original = TrainingConfig("/datasets/d.tar", "run")
     (output / "config.json").write_text(json.dumps(asdict(original)))
 
-    resumed = TrainingConfig("/datasets/d.tar", "run", resolution=518, resume_checkpoint="/runs/run/checkpoints/last.ckpt")
+    resumed = TrainingConfig("/datasets/d.tar", "run", resolution=640, resume_checkpoint="/runs/run/checkpoints/last.ckpt")
     job = ChessQueriesTrainingJob(resumed, tmp_path, Mock())
     with pytest.raises(ValueError, match="resolution"):
         job.check_resume(tmp_path / "runs/run/checkpoints/last.ckpt", output)
@@ -184,3 +198,23 @@ def test_resume_refuses_changed_settings(tmp_path: Path) -> None:
 
     same = TrainingConfig("/datasets/d.tar", "run", epochs=60, resume_checkpoint="/runs/run/checkpoints/last.ckpt")
     ChessQueriesTrainingJob(same, tmp_path, Mock()).check_resume(tmp_path / "runs/run/checkpoints/last.ckpt", output)
+
+
+def test_resume_refuses_per_epoch_schedule(tmp_path: Path) -> None:
+    output = tmp_path / "runs" / "run"
+    (output / "checkpoints").mkdir(parents=True)
+    # Written when the schedule stepped per epoch: 4 epochs done, 40 optimizer steps
+    torch.save({"global_step": 40, "lr_schedulers": [{"last_epoch": 4}]}, output / "checkpoints" / "last.ckpt")
+    config = TrainingConfig("/datasets/d.tar", "run", resume_checkpoint="/runs/run/checkpoints/last.ckpt")
+    (output / "config.json").write_text(json.dumps(asdict(config)))
+    with pytest.raises(ValueError, match="per-epoch"):
+        ChessQueriesTrainingJob(config, tmp_path, Mock()).check_resume(output / "checkpoints" / "last.ckpt", output)
+
+
+def test_resolution_follows_encoder_patch_size() -> None:
+    dinov3 = "vit_small_patch16_dinov3.lvd1689m"
+    TrainingConfig("/datasets/d.tar", "run", encoder=dinov3, resolution=640)
+    with pytest.raises(ValueError, match="16px"):
+        TrainingConfig("/datasets/d.tar", "run", encoder=dinov3, resolution=644)
+    with pytest.raises(ValueError, match="14px"):
+        TrainingConfig("/datasets/d.tar", "run", encoder="vit_large_patch14_dinov2.lvd142m", resolution=640)

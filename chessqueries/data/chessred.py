@@ -12,8 +12,7 @@ from chessqueries.data.inventory import FROZEN_SAMPLE_COUNTS
 ANNOTATIONS_FILE = "annotations.json"
 # We ship one set of images: the authors' offline-resized 1024x1024 set — the
 # exact inputs the released checkpoint was trained on, and what reproduces the
-# paper (the raw 3072x3072 images + a runtime `Resize` do not; see
-# `models/chessred_resnext.py` and upstream issue
+# paper (the raw 3072x3072 images + a runtime `Resize` do not; see upstream issue
 # tmasouris/end-to-end-chess-recognition#5).
 IMAGE_SIZE = 1024
 
@@ -34,7 +33,7 @@ def load_annotations(dataroot: Path) -> dict:
     if not path.is_file():
         raise FileNotFoundError(
             f"{path} not found. Download ChessReD first:\n"
-            f"    poetry run python scripts/download_data.py chessred"
+            f"    uv run python scripts/download_data.py chessred"
         )
     with open(path) as f:
         return json.load(f)

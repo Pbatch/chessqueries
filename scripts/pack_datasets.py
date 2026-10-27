@@ -1,13 +1,10 @@
-"""Pack the training datasets (ChessReD, ChessCog, ChessCam) into one tar with smaller images.
+"""Pack the training datasets (ChessReD, ChessCog, ChessCam, SLCC) into one tar with smaller images.
 
 Images whose shorter side exceeds --max-side are shrunk to it (aspect kept) and every image is
 stored as JPEG, so the tar holds no more pixels than training at that resolution uses: the
 training transform resizes straight to a square, so a shorter side of 644 loses nothing at 644.
-Annotations are copied unchanged and the layout matches data/, so after extracting
-
-    DATA_ROOT=/path/to/chessqueries-data python scripts/train_chessqueries.py ...
-
-reads it directly.
+Annotations are copied unchanged and the layout matches data/, so the Modal training job
+(chessqueries/train/training_job.py) extracts it and points DATA_ROOT at it.
 
     .venv/bin/python scripts/pack_datasets.py            # -> dist/chessqueries-data.tar
 """
@@ -23,7 +20,8 @@ from PIL import Image
 from tqdm import tqdm
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DATASETS = ("chessred", "chesscog", "chesscam")
+# Each dataset's folder under data/; SLCC's also holds its release bundle and source videos
+DATASETS = {"chessred": "chessred", "chesscog": "chesscog", "chesscam": "chesscam", "slcc": "slcc/dataset"}
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png"}
 
 
@@ -46,8 +44,8 @@ def shrink(job: tuple[Path, Path, int, int]) -> None:
 def plan(src_root: Path, out_root: Path, max_side: int, quality: int) -> tuple[list, list]:
     """(image jobs, other files to copy) for every dataset"""
     jobs, copies = [], []
-    for name in DATASETS:
-        root = src_root / name
+    for name, folder in DATASETS.items():
+        root = src_root / folder
         if not root.is_dir():
             raise SystemExit(f"{root} not found; download or build {name} first")
         for path in root.rglob("*"):
