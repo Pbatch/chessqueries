@@ -1,4 +1,5 @@
 """GPU batch augmentation: the warp maths, and that it matches the CPU presets it replaces."""
+
 from unittest.mock import Mock
 
 import pytest
@@ -59,7 +60,11 @@ def test_geometric_coverage_matches_the_cpu_preset(preset: Augment) -> None:
     white = torch.ones(400, 3, 64, 64)
     gpu = _black_share(warp(white, sample_homographies(400, 64, 64, preset, "cpu")))
     cpu_tf = build_transform(64, train=True, augment=preset).transforms
-    geometric = [t for t in cpu_tf if type(t).__name__ in {"RandomApply", "RandomPerspective", "RandomAffine"}]
+    geometric = [
+        t
+        for t in cpu_tf
+        if type(t).__name__ in {"RandomApply", "RandomPerspective", "RandomAffine"}
+    ]
     cpu_images = []
     for image in white:
         for t in geometric:
@@ -81,7 +86,9 @@ def test_colour_jitter_stays_in_range_and_varies() -> None:
 
 
 def test_datamodule_hook_augments_only_in_training() -> None:
-    dm = JointDataModule((), resolution=32, batch_size=2, workers=0, augment=Augment.GEOMETRIC_MILD, gpu_augment=True)
+    dm = JointDataModule(
+        (), resolution=32, batch_size=2, workers=0, augment=Augment.GEOMETRIC_MILD, gpu_augment=True
+    )
     x = torch.full((2, 3, 32, 32), 128, dtype=torch.uint8)
     y = torch.zeros(2, 64, dtype=torch.long)
     dm.trainer = Mock(training=False)

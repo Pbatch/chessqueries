@@ -1,9 +1,11 @@
 """ChessQueries model: ViT encoder + 64 semantic square queries + transformer decoder
 with a shared per-square classification head."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from typing import Any
 
 import timm
 import torch
@@ -17,18 +19,25 @@ from chessqueries.models.base import BoardRecognizer
 class HeadType(str, Enum):
     """How the 64 squares are read off the encoder."""
 
-    QUERY = "query"    # learned square queries + transformer decoder
+    QUERY = "query"  # learned square queries + transformer decoder
     LINEAR = "linear"  # 8x8 avg-pool of the patch grid + shared head (no-decoder ablation)
+
 
 NUM_CLASSES = NUM_PIECES
 DEFAULT_ENCODER = "vit_base_patch14_dinov2.lvd142m"
 
 # Aux-head target decompositions of the 13-class label (list index == Piece value).
-_TYPE_ORDER = [PieceType.PAWN, PieceType.KNIGHT, PieceType.BISHOP,
-               PieceType.ROOK, PieceType.QUEEN, PieceType.KING]
-NUM_TYPES = len(_TYPE_ORDER) + 1   # 0=empty, 1..6 = piece type
-NUM_COLORS = 3                     # 0=empty, 1=white, 2=black
-LABEL_TO_TYPE = [0 if p.is_empty else _TYPE_ORDER.index(p.piece_type) + 1 for p in Piece]
+_TYPE_ORDER = [
+    PieceType.PAWN,
+    PieceType.KNIGHT,
+    PieceType.BISHOP,
+    PieceType.ROOK,
+    PieceType.QUEEN,
+    PieceType.KING,
+]
+NUM_TYPES = len(_TYPE_ORDER) + 1  # 0=empty, 1..6 = piece type
+NUM_COLORS = 3  # 0=empty, 1=white, 2=black
+LABEL_TO_TYPE = [0 if p.piece_type is None else _TYPE_ORDER.index(p.piece_type) + 1 for p in Piece]
 LABEL_TO_COLOR = [0 if p.is_empty else (1 if p.color is Color.WHITE else 2) for p in Piece]
 
 
@@ -77,6 +86,9 @@ class SquareQueries(nn.Module):
 
 
 class ChessQueriesModel(BoardRecognizer):
+    label_to_type: torch.Tensor
+    label_to_color: torch.Tensor
+
     def __init__(
         self,
         encoder_name: str = DEFAULT_ENCODER,
@@ -91,8 +103,12 @@ class ChessQueriesModel(BoardRecognizer):
         super().__init__()
         # str accepted for checkpoint hparams round-trips; unknown values raise here.
         self.head_type = HeadType(head_type)
-        self.encoder = timm.create_model(
-            encoder_name, pretrained=pretrained, num_classes=0, dynamic_img_size=True,
+        # timm encoders (ViT, EVA) expose different attributes; keep them untyped.
+        self.encoder: Any = timm.create_model(
+            encoder_name,
+            pretrained=pretrained,
+            num_classes=0,
+            dynamic_img_size=True,
             drop_path_rate=drop_path_rate,
         )
         dim = self.encoder.embed_dim
@@ -136,7 +152,7 @@ class ChessQueriesModel(BoardRecognizer):
     def features(self, x: torch.Tensor) -> torch.Tensor:
         memory = self.encode(x)  # (B, N, dim)
         if self.head_type is HeadType.LINEAR:
-            patch = memory[:, self.encoder.num_prefix_tokens:, :]  # drop CLS/register tokens
+            patch = memory[:, self.encoder.num_prefix_tokens :, :]  # drop CLS/register tokens
             b, p, d = patch.shape
             g = int(round(p**0.5))  # square patch grid (res/patch), row-major
             grid = patch.transpose(1, 2).reshape(b, d, g, g)  # (B, dim, g, g)

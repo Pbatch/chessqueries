@@ -1,6 +1,7 @@
 """Shared eval-script reporting: the metric printout and the metrics/preds JSON
 pair every eval entry point writes (consumed by the visualizer and the paper
 tooling), plus the CLI split resolution they all repeat."""
+
 from __future__ import annotations
 
 import json
@@ -20,9 +21,7 @@ def resolve_split(ds_obj: ChessDataset, split_arg: str | None) -> Split | None:
     split-less datasets. Exits with a usage message when a required split is missing."""
     split = Split(split_arg) if (ds_obj.splits and split_arg) else None
     if ds_obj.splits and split is None:
-        raise SystemExit(
-            f"{ds_obj.name.value} requires --split {[s.value for s in ds_obj.splits]}"
-        )
+        raise SystemExit(f"{ds_obj.name.value} requires --split {[s.value for s in ds_obj.splits]}")
     return split
 
 

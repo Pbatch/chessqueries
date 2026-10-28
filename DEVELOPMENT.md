@@ -107,5 +107,6 @@ chessqueries/
   train/              Lightning module, multi-dataset input pipeline, and the Modal job
   metrics/            board accuracy, tolerance curve, and edit distance
 scripts/               download, packing, training, evaluation, and export entrypoints
+synthetic/             Blender renderer for ChessCog-style synthetic boards (see its README)
 tests/                 unit and integration tests
 ```

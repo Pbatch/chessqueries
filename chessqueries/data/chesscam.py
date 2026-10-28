@@ -1,5 +1,6 @@
 """ChessCam dataset: frames of real games labelled with piece boxes and board x-corners,
 converted to FENs by ``make_chessqueries_dataset.py`` in CameraChessLabels."""
+
 from __future__ import annotations
 
 import json
@@ -28,6 +29,7 @@ class ChessCam(ChessDataset):
         self.expected_samples = {split: counts[split.value] for split in self.splits}
 
     def _load_samples(self, split: Split | None) -> list[BoardSample]:
+        assert split is not None  # _validate_split requires one
         return [
             BoardSample(
                 image_path=self.dataroot / a["image"],

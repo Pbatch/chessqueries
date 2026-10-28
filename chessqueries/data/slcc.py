@@ -147,7 +147,7 @@ class SLCC(ChessDataset):
         if not self.manifest_path.is_file():
             raise FileNotFoundError(
                 f"SLCC manifest not found at {self.manifest_path}. "
-                "Reconstruct SLCC with the upstream ChessQueries tooling (chessqueries.annotate.reconstruct)."
+                "Reconstruct SLCC with the upstream ChessQueries tooling (see DEVELOPMENT.md)."
             )
         return json.loads(self.manifest_path.read_text())["samples"]
 
@@ -168,7 +168,9 @@ class SLCC(ChessDataset):
             sample_id = (
                 explicit_id
                 if isinstance(explicit_id, str) and explicit_id
-                else Path(image).stem if isinstance(image, str) and image else ""
+                else Path(image).stem
+                if isinstance(image, str) and image
+                else ""
             )
             if not sample_id:
                 issues.append(f"record {index} has no sample identity")
@@ -211,7 +213,11 @@ class SLCC(ChessDataset):
             issues.append(f"game IDs cross splits: {straddling_games[:5]}")
 
         actual = Counter(record.get("split") for record in records)
-        expected = {split.value: count for split, count in self.expected_samples.items()}
+        expected = {
+            split.value: count
+            for split, count in self.expected_samples.items()
+            if split is not None
+        }
         if dict(actual) != expected:
             issues.append(f"full split counts are {dict(actual)}, expected {expected}")
         missing = sum(

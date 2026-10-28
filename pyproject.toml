@@ -5,7 +5,7 @@ description = "Chess board recognition: image -> per-square (FEN-like) board sta
 authors = [{ name = "Joel Seytre" }]
 license = "PolyForm-Noncommercial-1.0.0"
 readme = "README.md"
-requires-python = ">=3.12,<3.13"
+requires-python = "==3.13.*"
 
 # ---------------------------------------------------------------------------
 # Core ML runtime — encoder/decoder model, data, training, eval.
@@ -18,7 +18,6 @@ dependencies = [
     "timm>=1.0,<2",                  # pretrained DINOv2/DINOv3 ViT encoders
     "pytorch-lightning>=2.4,<3",     # training loops
     "safetensors>=0.8,<0.9",         # safe, tensor-only release checkpoints
-
     # Data + notation + IO
     "numpy>=1.26,<2",
     "pillow>=10.2,<11",
@@ -26,11 +25,11 @@ dependencies = [
     "requests>=2.31,<3",
     "gdown>=5.2,<6",                 # Google Drive downloads (ChessReD images; CVChess folder)
     "osfclient>=0.0.5,<0.0.6",       # OSF clone for the ChessCog synthetic dataset
-
     # Config
     "pydantic>=2.0,<3",
     "pydantic-settings>=2.0,<3",
     "python-dotenv>=1.0,<2",
+    "bpy",
 ]
 
 [project.urls]
@@ -56,10 +55,6 @@ dev = [
     "pytest>=8.0,<9",
     "pytest-cov>=7.1.0,<8",
     "python-chess>=1.999,<2",        # FEN checks in the dataset label tests
-    "black>=24.0,<25",
-    "isort>=5.12,<6",
-    "flake8>=7.0,<8",
-    "pyright",
     "ruff==0.15.18",
     "ty==0.0.92",
     "pre-commit==4.5.1",
@@ -71,14 +66,6 @@ default-groups = []
 [tool.uv.build-backend]
 module-root = ""
 
-[tool.black]
-line-length = 100
-target-version = ["py312"]
-
-[tool.isort]
-profile = "black"
-line_length = 100
-
 [tool.ruff]
 line-length = 100
 target-version = "py312"
@@ -87,14 +74,20 @@ target-version = "py312"
 # Syntax errors, Pyflakes, and the low-ambiguity pycodestyle families only.
 select = ["E4", "E7", "E9", "F"]
 
-[tool.pyright]
-typeCheckingMode = "basic"
-reportMissingImports = "warning"
-reportMissingTypeStubs = false
-exclude = [".venv", "**/__pycache__", "third_party", "data"]
-
 [tool.ty.src]
 exclude = [".venv", "**/__pycache__", "third_party", "data"]
+
+[tool.ty.analysis]
+# Optional toolchains outside the uv groups: Blender (synthetic/), ONNX and LiteRT exporters.
+allowed-unresolved-imports = [
+    "bpy", "bmesh", "mathutils",
+    "onnx", "onnxruntime",
+    "litert_torch", "litert_torch.**", "tflite", "ai_edge_litert", "ai_edge_litert.**",
+]
+
+[tool.ty.rules]
+# nn.Module declares `forward` as a Callable attribute, so every `def forward` override trips this.
+invalid-mutable-override = "ignore"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

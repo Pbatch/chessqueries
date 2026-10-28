@@ -1,5 +1,6 @@
 """Dataset abstractions: the `BoardSample` schema, the `ChessDataset` ABC, and
 the dataset registry."""
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -21,6 +22,7 @@ class DatasetName(str, Enum):
     CVCHESS = "cvchess"
     SLCC = "slcc"
     CHESSCAM = "chesscam"
+    SYNTHETIC = "synthetic"
 
 
 @dataclass
@@ -84,9 +86,7 @@ class DatasetCompleteness:
             "split": self.split.value if self.split is not None else None,
             "mode": "allow_partial" if self.allow_partial else "strict",
             "scope": (
-                "full_split"
-                if expected_evaluation == self.expected_samples
-                else "explicit_subset"
+                "full_split" if expected_evaluation == self.expected_samples else "explicit_subset"
             ),
             "data_complete": not self.partial,
             "expected_samples": self.expected_samples,
@@ -148,7 +148,7 @@ DATASET_REGISTRY: dict[DatasetName, type["ChessDataset"]] = {}
 class ChessDataset(ABC):
     name: ClassVar[DatasetName]
     splits: ClassVar[tuple[Split, ...]] = ()  # () = no official split
-    expected_samples: ClassVar[dict[Split | None, int]]
+    expected_samples: dict[Split | None, int]  # an instance attribute where counts aren't frozen
 
     def __init_subclass__(cls, **kwargs) -> None:
         super().__init_subclass__(**kwargs)
@@ -156,12 +156,13 @@ class ChessDataset(ABC):
             DATASET_REGISTRY[cls.name] = cls
 
     @abstractmethod
-    def _load_samples(self, split: Split | None) -> list[BoardSample]:
-        ...
+    def _load_samples(self, split: Split | None) -> list[BoardSample]: ...
 
     def _validate_split(self, split: Split | None) -> None:
         if self.splits and split not in self.splits:
-            raise ValueError(f"{self.name.value}: split must be one of {[s.value for s in self.splits]}, got {split!r}")
+            raise ValueError(
+                f"{self.name.value}: split must be one of {[s.value for s in self.splits]}, got {split!r}"
+            )
         if not self.splits and split is not None:
             raise ValueError(f"{self.name.value} has no splits; pass split=None")
 
@@ -183,14 +184,10 @@ class ChessDataset(ABC):
                 duplicates.add(sample.sample_id)
             seen.add(sample.sample_id)
         if duplicates:
-            raise ValueError(
-                f"{self.name.value}: duplicate sample IDs: {sorted(duplicates)[:5]}"
-            )
+            raise ValueError(f"{self.name.value}: duplicate sample IDs: {sorted(duplicates)[:5]}")
 
         available = [sample for sample in labelled if sample.image_path.is_file()]
-        missing = tuple(
-            sample.sample_id for sample in labelled if not sample.image_path.is_file()
-        )
+        missing = tuple(sample.sample_id for sample in labelled if not sample.image_path.is_file())
         completeness = DatasetCompleteness(
             dataset=self.name,
             split=split,

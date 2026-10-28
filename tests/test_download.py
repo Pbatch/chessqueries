@@ -36,12 +36,13 @@ def _digest(data: bytes) -> str:
 
 def test_http_download_installs_only_after_hash_verification(tmp_path, monkeypatch):
     payload = b"complete artifact"
-    monkeypatch.setattr(
-        download.requests, "get", lambda *args, **kwargs: _Response([payload])
-    )
+    monkeypatch.setattr(download.requests, "get", lambda *args, **kwargs: _Response([payload]))
     destination = tmp_path / "artifact.bin"
 
-    assert download._download("https://example.test/artifact", destination, _digest(payload)) == destination
+    assert (
+        download._download("https://example.test/artifact", destination, _digest(payload))
+        == destination
+    )
     assert destination.read_bytes() == payload
     assert not (tmp_path / "artifact.bin.part").exists()
 
@@ -62,9 +63,7 @@ def test_interrupted_http_download_never_appears_at_final_path(tmp_path, monkeyp
 
 
 def test_hash_mismatch_stays_partial(tmp_path, monkeypatch):
-    monkeypatch.setattr(
-        download.requests, "get", lambda *args, **kwargs: _Response([b"wrong"])
-    )
+    monkeypatch.setattr(download.requests, "get", lambda *args, **kwargs: _Response([b"wrong"]))
     destination = tmp_path / "artifact.bin"
 
     with pytest.raises(RuntimeError, match="SHA-256 mismatch"):

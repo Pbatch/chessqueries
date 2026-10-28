@@ -1,4 +1,5 @@
 """Checkpoints with enum hparams survive torch>=2.6 weights_only loading."""
+
 import sys
 from enum import Enum
 from types import ModuleType
@@ -28,15 +29,24 @@ def test_enum_hparams_round_trip_weights_only(tmp_path):
     assert loaded["head_type"] is HeadType.LINEAR
 
 
-@pytest.mark.parametrize("legacy_path, members, current", [
-    (LEGACY_HEAD_TYPE_PATH, {"QUERY": "query", "LINEAR": "linear"}, HeadType.LINEAR),
-    (LEGACY_SCHEDULE_PATH, {"NONE": "none", "STEP": "step", "COSINE": "cosine"}, Schedule.COSINE),
-])
-def test_moved_enum_loads_from_legacy_checkpoint_path(tmp_path, monkeypatch, legacy_path, members, current):
+@pytest.mark.parametrize(
+    "legacy_path, members, current",
+    [
+        (LEGACY_HEAD_TYPE_PATH, {"QUERY": "query", "LINEAR": "linear"}, HeadType.LINEAR),
+        (
+            LEGACY_SCHEDULE_PATH,
+            {"NONE": "none", "STEP": "step", "COSINE": "cosine"},
+            Schedule.COSINE,
+        ),
+    ],
+)
+def test_moved_enum_loads_from_legacy_checkpoint_path(
+    tmp_path, monkeypatch, legacy_path, members, current
+):
     """Existing checkpoints should not require the retired source module."""
     module_name, _, class_name = legacy_path.rpartition(".")
     legacy_module = ModuleType(module_name)
-    legacy_enum = Enum(class_name, members, type=str, module=module_name)
+    legacy_enum = Enum(class_name, members, type=str, module=module_name)  # ty: ignore[mismatched-type-name]
     setattr(legacy_module, class_name, legacy_enum)
     monkeypatch.setitem(sys.modules, module_name, legacy_module)
 

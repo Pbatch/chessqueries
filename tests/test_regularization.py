@@ -1,4 +1,5 @@
 """The optional regularization knobs wire through to the model and loss."""
+
 import torch
 
 from chessqueries.train.lit import LitChessQueriesModel
@@ -21,7 +22,7 @@ def test_drop_path_activates_stochastic_depth():
 
 def test_label_smoothing_raises_loss_on_confident_correct_preds():
     logits = torch.zeros(1, 64, 13)
-    logits[..., 0] = 20.0           # confident, correct
+    logits[..., 0] = 20.0  # confident, correct
     labels = torch.zeros(1, 64, dtype=torch.long)
     base = LitChessQueriesModel(freeze_encoder=True, label_smoothing=0.0)._loss(logits, labels)
     smooth = LitChessQueriesModel(freeze_encoder=True, label_smoothing=0.1)._loss(logits, labels)

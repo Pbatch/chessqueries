@@ -14,12 +14,14 @@ With --check-images it then runs the exported model on onnxruntime's CUDA provid
 and compares its argmax against PyTorch on the same inputs.
 
 Usage:
-    uv run --no-project --python .venv/bin/python --with onnx --with onnxruntime-gpu \
+    # onnxruntime-gpu 1.22 is the CUDA 12 build, matching the project's torch wheels
+    uv run --no-project --python .venv/bin/python --with onnx --with onnxruntime-gpu==1.22.0 \
         scripts/export_onnx.py checkpoints/lite-ft-chesscam/lite-ft-chesscam-last.safetensors \
         ../CameraChessWeb/public/chessqueries_lite_fp16.onnx \
         --check-images 'data/chesscam/images/test/*.jpg'
     # Add --compute fp32 (and write chessqueries_lite_fp32.onnx) for the shader-f16-free model
 """
+
 from __future__ import annotations
 
 import argparse
@@ -27,12 +29,11 @@ import glob
 from pathlib import Path
 
 import torch
-from timm.layers import resample_abs_pos_embed
 from torch import nn
 from torch.nn import functional as F
 from torchvision.io import ImageReadMode, read_image
 
-from chessqueries.data.transforms import IMAGENET_MEAN, IMAGENET_STD
+from chessqueries.models.browser import RGBANormalize, bake_pos_embed
 from chessqueries.models.checkpoint import load_safetensors_model, read_safetensors_metadata
 
 
@@ -43,27 +44,11 @@ class BrowserModel(nn.Module):
         super().__init__()
         self.model = model
         self.dtype = dtype
-        self.register_buffer("mean", 255.0 * torch.tensor(IMAGENET_MEAN).view(1, 3, 1, 1))
-        self.register_buffer("std", 255.0 * torch.tensor(IMAGENET_STD).view(1, 3, 1, 1))
+        self.normalize = RGBANormalize()
 
     def forward(self, image: torch.Tensor) -> torch.Tensor:
-        x = image[..., :3].permute(0, 3, 1, 2)
-        x = ((x - self.mean) / self.std).to(self.dtype)
+        x = self.normalize(image).to(self.dtype)
         return F.softmax(self.model(x).float(), dim=-1)
-
-
-def bake_pos_embed(model: nn.Module, resolution: int) -> None:
-    """Resample the encoder's position embedding to the export resolution up front.
-
-    timm resamples it on every forward with antialiased bicubic interpolation, which
-    has no ONNX op; at the baked size the resample is skipped."""
-    encoder = model.encoder
-    grid = resolution // encoder.patch_embed.patch_size[0]
-    encoder.pos_embed = nn.Parameter(resample_abs_pos_embed(
-        encoder.pos_embed, new_size=(grid, grid), old_size=encoder.patch_embed.grid_size,
-        num_prefix_tokens=0 if encoder.no_embed_class else encoder.num_prefix_tokens,
-    ), requires_grad=False)
-    encoder.patch_embed.grid_size = (grid, grid)
 
 
 def store_weights_fp16(path: Path) -> None:
@@ -79,7 +64,9 @@ def store_weights_fp16(path: Path) -> None:
         if init.data_type != TensorProto.FLOAT:
             continue
         name = init.name
-        half = numpy_helper.from_array(numpy_helper.to_array(init).astype(np.float16), f"{name}_fp16")
+        half = numpy_helper.from_array(
+            numpy_helper.to_array(init).astype(np.float16), f"{name}_fp16"
+        )
         init.CopyFrom(half)
         casts.append(helper.make_node("Cast", [half.name], [name], to=TensorProto.FLOAT))
     nodes = casts + list(graph.node)
@@ -91,8 +78,13 @@ def store_weights_fp16(path: Path) -> None:
 def load_rgba(path: str, resolution: int) -> torch.Tensor:
     """(1, R, R, 4) float32 RGBA, square-resized like the browser's canvas drawImage."""
     rgb = read_image(path, mode=ImageReadMode.RGB).float()
-    rgb = F.interpolate(rgb[None], size=(resolution, resolution), mode="bilinear",
-                        antialias=True, align_corners=False)
+    rgb = F.interpolate(
+        rgb[None],
+        size=(resolution, resolution),
+        mode="bilinear",
+        antialias=True,
+        align_corners=False,
+    )
     alpha = torch.full_like(rgb[:, :1], 255.0)
     return torch.cat([rgb, alpha], dim=1).permute(0, 2, 3, 1).contiguous()
 
@@ -119,8 +111,10 @@ def check(model: nn.Module, onnx_path: Path, image_glob: str, resolution: int, l
         board_agree += int(same.all())
         max_diff = max(max_diff, float((expected - actual).abs().max()))
     n = len(paths)
-    print(f"{n} images: square agreement {square_agree / (64 * n):.4%}, "
-          f"board agreement {board_agree / n:.2%}, max |prob diff| {max_diff:.4f}")
+    print(
+        f"{n} images: square agreement {square_agree / (64 * n):.4%}, "
+        f"board agreement {board_agree / n:.2%}, max |prob diff| {max_diff:.4f}"
+    )
 
 
 def main() -> None:
@@ -129,13 +123,15 @@ def main() -> None:
     p.add_argument("output", type=Path)
     p.add_argument("--opset", type=int, default=17)
     p.add_argument("--compute", choices=["fp16", "fp32"], default="fp16")
-    p.add_argument("--check-images", default=None, help="glob of images to compare ONNX vs PyTorch on")
+    p.add_argument(
+        "--check-images", default=None, help="glob of images to compare ONNX vs PyTorch on"
+    )
     p.add_argument("--check-limit", type=int, default=200)
     args = p.parse_args()
 
     resolution = int(read_safetensors_metadata(args.checkpoint)["resolution"])
     recognizer = load_safetensors_model(args.checkpoint, device="cuda")
-    bake_pos_embed(recognizer, resolution)
+    bake_pos_embed(recognizer.encoder, resolution)
     dtype = torch.float16 if args.compute == "fp16" else torch.float32
     model = BrowserModel(recognizer.to(dtype), dtype).cuda().eval()
     dummy = torch.zeros(1, resolution, resolution, 4, device="cuda")
@@ -144,12 +140,20 @@ def main() -> None:
     torch.backends.mha.set_fastpath_enabled(False)
     with torch.no_grad():
         torch.onnx.export(
-            model, (dummy,), str(args.output), dynamo=False, opset_version=args.opset,
-            input_names=["image"], output_names=["probs"], do_constant_folding=True,
+            model,
+            (dummy,),
+            str(args.output),
+            dynamo=False,
+            opset_version=args.opset,
+            input_names=["image"],
+            output_names=["probs"],
+            do_constant_folding=True,
         )
     if args.compute == "fp32":
         store_weights_fp16(args.output)
-    print(f"-> {args.output} ({args.output.stat().st_size / 1e6:.1f} MB, {resolution}px, {args.compute} compute)")
+    print(
+        f"-> {args.output} ({args.output.stat().st_size / 1e6:.1f} MB, {resolution}px, {args.compute} compute)"
+    )
 
     if args.check_images:
         check(model, args.output, args.check_images, resolution, args.check_limit)

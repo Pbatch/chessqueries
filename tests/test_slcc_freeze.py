@@ -6,6 +6,7 @@ anyone who does have it. Bumping the dataset is a deliberate act: regenerate the
 manifest, confirm the new numbers, then update the constants below in the same
 commit.
 """
+
 import collections
 import hashlib
 import json
@@ -28,7 +29,8 @@ N_VIDEOS = 20
 def manifest():
     path = SLCC().manifest_path
     if not path.is_file():
-        pytest.skip(f"SLCC manifest not present at {path} (data/ is local-only)")
+        # ty misreads pytest's _WithException wrapper's signature
+        pytest.skip(f"SLCC manifest not present at {path} (data/ is local-only)")  # ty: ignore[too-many-positional-arguments]
     return path
 
 

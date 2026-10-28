@@ -5,6 +5,7 @@ container's local disk, since shuffled reads from a network volume are slow, and
 pointed at it. Runs write to <volume>/runs/<run_name>/, committing the volume on every checkpoint
 so a preempted run can be resumed from its last.ckpt.
 """
+
 from __future__ import annotations
 
 import json
@@ -15,6 +16,7 @@ import tempfile
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Literal, cast, get_args
 
 import pytorch_lightning as pl
 import torch
@@ -32,23 +34,32 @@ from chessqueries.models.checkpoint import (
     load_safetensors_model,
     read_safetensors_metadata,
 )
-from chessqueries.models.chessqueries_model import HeadType
+from chessqueries.models.chessqueries_model import ChessQueriesModel, HeadType
 from chessqueries.train.lit import JointDataModule, LitChessQueriesModel, Schedule
 from chessqueries.train.training_logging import create_wandb_logger
 
-PRECISIONS = {"32-true", "16-mixed", "bf16-mixed"}
+Precision = Literal["32-true", "16-mixed", "bf16-mixed"]
+PRECISIONS = set(get_args(Precision))
 # How the learning rates grow with the batch size, relative to the paper's batch of 6
 LR_SCALINGS = {"none", "sqrt", "linear"}
 PAPER_BATCH_SIZE = 6
 # Settings that must not change when resuming: the checkpoint can't record them all, and a new
 # batch size would rescale the learning rates mid-schedule
-RESUME_FIXED = ("encoder", "resolution", "datasets", "head_type", "decoder_layers", "batch_size", "lr_scaling")
+RESUME_FIXED = (
+    "encoder",
+    "resolution",
+    "datasets",
+    "head_type",
+    "decoder_layers",
+    "batch_size",
+    "lr_scaling",
+)
 
 
 @dataclass(frozen=True, slots=True)
 class TrainingConfig:
-    """Defaults train DINOv3 ViT-S/16 at 448px, the browser model's size, on ChessReD + ChessCog +
-    ChessCam. The rest is the paper recipe (tuned for DINOv2 ViT-L/14 at 644px), except the batch:
+    """Defaults train DINOv3 ViT-S/16 at 448px, the browser model's size, on ChessReD, ChessCog,
+    ChessCam, SLCC and our synthetic renders. The rest is the paper recipe (tuned for DINOv2 ViT-L/14 at 644px), except the batch:
     the paper's 6 leaves an A100-80GB mostly idle, so it is 16 here, with the paper's learning
     rates (given for batch 6) scaled by the square root of the batch ratio."""
 
@@ -61,7 +72,7 @@ class TrainingConfig:
     precision: str = "bf16-mixed"
     resolution: int = 448
     encoder: str = "vit_small_patch16_dinov3.lvd1689m"
-    datasets: str = "chessred,chesscog,chesscam,slcc"
+    datasets: str = "chessred,chesscog,chesscam,slcc,synthetic"
     learning_rate: float = 1.4e-4
     encoder_learning_rate: float = 1.4e-5
     weight_decay: float = 0.05
@@ -90,8 +101,12 @@ class TrainingConfig:
         if self.precision not in PRECISIONS:
             raise ValueError(f"Precision must be one of {sorted(PRECISIONS)}")
         if self.resolution % self.patch_size():
-            raise ValueError(f"Resolution must be a multiple of the encoder's {self.patch_size()}px patch size")
-        if not 0 < self.learning_rate < float("inf") or not 0 < self.encoder_learning_rate < float("inf"):
+            raise ValueError(
+                f"Resolution must be a multiple of the encoder's {self.patch_size()}px patch size"
+            )
+        if not 0 < self.learning_rate < float("inf") or not 0 < self.encoder_learning_rate < float(
+            "inf"
+        ):
             raise ValueError("Learning rates must be positive and finite")
         if not 0 <= self.unfreeze_epoch < self.epochs:
             raise ValueError("The encoder must unfreeze before the last epoch")
@@ -113,12 +128,14 @@ class TrainingConfig:
         return tuple(DatasetName(name.strip()) for name in self.datasets.split(",") if name.strip())
 
     def eval_sources(self) -> tuple[DatasetName, ...]:
-        return tuple(DatasetName(name.strip()) for name in self.eval_datasets.split(",") if name.strip())
+        return tuple(
+            DatasetName(name.strip()) for name in self.eval_datasets.split(",") if name.strip()
+        )
 
     def lr_factor(self) -> float:
         """Multiplier on the learning rates, which are given for the paper's batch of 6"""
         ratio = self.batch_size / PAPER_BATCH_SIZE
-        return {"none": 1.0, "sqrt": ratio ** 0.5, "linear": ratio}[self.lr_scaling]
+        return {"none": 1.0, "sqrt": ratio**0.5, "linear": ratio}[self.lr_scaling]
 
 
 def check_weights_match(path: Path, config: TrainingConfig) -> None:
@@ -130,13 +147,19 @@ def check_weights_match(path: Path, config: TrainingConfig) -> None:
         "head_type": config.head_type,
         "decoder_layers": str(config.decoder_layers),
     }
-    mismatched = {key: (metadata.get(key), value) for key, value in expected.items() if metadata.get(key) != value}
+    mismatched = {
+        key: (metadata.get(key), value)
+        for key, value in expected.items()
+        if metadata.get(key) != value
+    }
     if mismatched:
         raise ValueError(f"{path} doesn't match the run's settings (weights, run): {mismatched}")
 
 
 @torch.no_grad()
-def evaluate_on_test(model: torch.nn.Module, config: TrainingConfig) -> dict[str, dict[str, float]]:
+def evaluate_on_test(
+    model: ChessQueriesModel, config: TrainingConfig
+) -> dict[str, dict[str, float]]:
     """Exact-board and per-square accuracy of `model` on each eval dataset's test split"""
     model = model.to("cuda").eval()
     transform = build_transform(config.resolution, train=False)
@@ -144,10 +167,18 @@ def evaluate_on_test(model: torch.nn.Module, config: TrainingConfig) -> dict[str
     for name in config.eval_sources():
         dataset = get_dataset(name).torch_dataset(Split.TEST, transform=transform)
         with torch.autocast("cuda", dtype=torch.bfloat16):
-            predictions = predict_all(model, dataset, device="cuda", batch_size=32, workers=config.workers,
-                                      desc=f"test {name.value}")
+            predictions = predict_all(
+                model,
+                dataset,
+                device="cuda",
+                batch_size=32,
+                workers=config.workers,
+                desc=f"test {name.value}",
+            )
         metrics = aggregate(predictions.preds, predictions.gts)
-        results[name.value] = {key: metrics[key] for key in ("n_boards", "board_accuracy", "per_square_accuracy")}
+        results[name.value] = {
+            key: metrics[key] for key in ("n_boards", "board_accuracy", "per_square_accuracy")
+        }
         print(name.value, results[name.value])
     return results
 
@@ -197,7 +228,9 @@ class ChessQueriesTrainingJob:
             raise FileNotFoundError(checkpoint)
         saved_path = output / "config.json"
         if not saved_path.is_file():
-            raise FileNotFoundError(f"{saved_path} is missing, so the run's settings can't be checked")
+            raise FileNotFoundError(
+                f"{saved_path} is missing, so the run's settings can't be checked"
+            )
         saved = json.loads(saved_path.read_text())
         changed = [key for key in RESUME_FIXED if saved.get(key) != getattr(self.config, key)]
         if changed:
@@ -207,7 +240,9 @@ class ChessQueriesTrainingJob:
         state = torch.load(checkpoint, map_location="cpu", mmap=True)
         schedulers = state.get("lr_schedulers") or []
         if schedulers and schedulers[0]["last_epoch"] != state["global_step"]:
-            raise ValueError(f"{checkpoint} has a per-epoch LR schedule, so it can't be resumed per batch")
+            raise ValueError(
+                f"{checkpoint} has a per-epoch LR schedule, so it can't be resumed per batch"
+            )
 
     def init_weights_path(self) -> Path | None:
         if not self.config.init_weights:
@@ -228,8 +263,9 @@ class ChessQueriesTrainingJob:
         with tempfile.TemporaryDirectory() as temporary:
             self.stage_datasets(Path(temporary))
             results = evaluate_on_test(load_safetensors_model(weights).float(), self.config)
-        (output / "test_metrics.json").write_text(json.dumps({"weights": self.config.init_weights, **results},
-                                                             indent=2) + "\n")
+        (output / "test_metrics.json").write_text(
+            json.dumps({"weights": self.config.init_weights, **results}, indent=2) + "\n"
+        )
         self.commit()
         return results
 
@@ -238,7 +274,9 @@ class ChessQueriesTrainingJob:
         if not os.environ.get("WANDB_API_KEY"):
             raise RuntimeError("wandb-secret must contain WANDB_API_KEY")
         output = self.root / "runs" / config.run_name
-        checkpoint = self.root / config.resume_checkpoint.lstrip("/") if config.resume_checkpoint else None
+        checkpoint = (
+            self.root / config.resume_checkpoint.lstrip("/") if config.resume_checkpoint else None
+        )
         if checkpoint is not None:
             self.check_resume(checkpoint, output)
         # A resumed run takes its weights from the checkpoint instead
@@ -251,7 +289,11 @@ class ChessQueriesTrainingJob:
         with tempfile.TemporaryDirectory() as temporary:
             data_root = self.stage_datasets(Path(temporary))
             datamodule = JointDataModule(
-                config.sources(), config.resolution, config.batch_size, config.workers, augment=config.augment,
+                config.sources(),
+                config.resolution,
+                config.batch_size,
+                config.workers,
+                augment=config.augment,
                 gpu_augment=config.gpu_augment,
             )
             model = LitChessQueriesModel(
@@ -274,14 +316,17 @@ class ChessQueriesTrainingJob:
             model.model.compile()
             callback = VolumeCheckpoint(output, self.commit)
             wandb_logger = create_wandb_logger(
-                output, run_name=config.run_name, project=config.wandb_project, entity=config.wandb_entity or None
+                output,
+                run_name=config.run_name,
+                project=config.wandb_project,
+                entity=config.wandb_entity or None,
             )
             self.commit()
             trainer = pl.Trainer(
                 accelerator="gpu",
                 devices=1,
                 max_epochs=config.epochs,
-                precision=config.precision,
+                precision=cast(Precision, config.precision),  # checked in TrainingConfig
                 gradient_clip_val=1.0,
                 log_every_n_steps=20,
                 callbacks=[callback, LearningRateMonitor(logging_interval="step")],
@@ -289,24 +334,38 @@ class ChessQueriesTrainingJob:
                 default_root_dir=output,
             )
             with wandb_logger.experiment:
-                wandb_logger.log_hyperparams({
-                    **asdict(config),
-                    "data_root": str(data_root),
-                    "lr_factor": config.lr_factor(),
-                    "effective_learning_rate": config.learning_rate * config.lr_factor(),
-                    "effective_encoder_learning_rate": config.encoder_learning_rate * config.lr_factor(),
-                })
-                trainer.fit(model, datamodule, ckpt_path=str(checkpoint) if checkpoint is not None else None)
+                wandb_logger.log_hyperparams(
+                    {
+                        **asdict(config),
+                        "data_root": str(data_root),
+                        "lr_factor": config.lr_factor(),
+                        "effective_learning_rate": config.learning_rate * config.lr_factor(),
+                        "effective_encoder_learning_rate": config.encoder_learning_rate
+                        * config.lr_factor(),
+                    }
+                )
+                trainer.fit(
+                    model, datamodule, ckpt_path=str(checkpoint) if checkpoint is not None else None
+                )
                 # Tensor-only copies of the best and last weights, for scripts/eval_cross_dataset.py and the exporters
-                for kind, path in (("best", callback.best_model_path), ("last", callback.last_model_path)):
-                    export_lightning_safetensors(Path(path), output / f"{kind}.safetensors",
-                                                 resolution=config.resolution)
+                for kind, path in (
+                    ("best", callback.best_model_path),
+                    ("last", callback.last_model_path),
+                ):
+                    export_lightning_safetensors(
+                        Path(path), output / f"{kind}.safetensors", resolution=config.resolution
+                    )
                 self.commit()
                 # The last weights, not the best: best is picked on a validation set ChessReD dominates
                 results = evaluate_on_test(model.model, config)
-                (output / "test_metrics.json").write_text(json.dumps({"weights": "last", **results}, indent=2) + "\n")
-                wandb_logger.experiment.summary.update({
-                    f"test/{name}/{metric}": value
-                    for name, metrics in results.items() for metric, value in metrics.items()
-                })
+                (output / "test_metrics.json").write_text(
+                    json.dumps({"weights": "last", **results}, indent=2) + "\n"
+                )
+                wandb_logger.experiment.summary.update(
+                    {
+                        f"test/{name}/{metric}": value
+                        for name, metrics in results.items()
+                        for metric, value in metrics.items()
+                    }
+                )
                 self.commit()

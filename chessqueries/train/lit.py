@@ -1,12 +1,16 @@
 """Lightning module + data module for the ChessQueries model."""
+
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from enum import Enum
+from typing import cast
 
 import pytorch_lightning as pl
 import torch
 from torch import nn
+from pytorch_lightning.utilities.parsing import AttributeDict
 from torch.utils.data import ConcatDataset, DataLoader
 
 from chessqueries.core import NUM_PIECES, Piece, Split
@@ -64,11 +68,14 @@ def _warmup_cosine_factor(
     return floor + (1.0 - floor) * 0.5 * (1.0 + math.cos(math.pi * progress))
 
 
-class _ValMetricsMixin:
+class _ValMetricsMixin(pl.LightningModule):
     """Shared validation loop for our LightningModules: accumulate per-square
     predictions/ground-truth, then report board/per-square accuracy via the
     project metrics. Subclasses provide ``_loss`` and a ``forward`` returning
     ``(B, 64, NUM_CLASSES)`` logits."""
+
+    def _loss(self, logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+        raise NotImplementedError
 
     def _reset_val_buffers(self) -> None:
         self._val_preds: list[list[int]] = []
@@ -104,10 +111,16 @@ class JointDataModule(pl.LightningDataModule):
     With ``gpu_augment``, loader workers only decode and resize, and augmentation
     plus normalization run on the GPU per batch (`chessqueries.data.gpu_augment`)."""
 
-    def __init__(self, sources: tuple[DatasetName, ...], resolution: int, batch_size: int, workers: int,
-                 augment: Augment | str = Augment.PHOTOMETRIC,
-                 normalization: Normalization = Normalization.IMAGENET,
-                 gpu_augment: bool = False) -> None:
+    def __init__(
+        self,
+        sources: tuple[DatasetName, ...],
+        resolution: int,
+        batch_size: int,
+        workers: int,
+        augment: Augment | str = Augment.PHOTOMETRIC,
+        normalization: Normalization = Normalization.IMAGENET,
+        gpu_augment: bool = False,
+    ) -> None:
         super().__init__()
         self.sources = tuple(sources)
         self.resolution = resolution
@@ -130,7 +143,9 @@ class JointDataModule(pl.LightningDataModule):
                 train_parts.append(ds.torch_dataset(Split.TRAIN, transform=tf, uint8=True))
                 val_parts.append(ds.torch_dataset(Split.VAL, transform=tf, uint8=True))
                 continue
-            train_tf = build_transform(self.resolution, train=True, augment=self.augment, normalization=self.normalization)
+            train_tf = build_transform(
+                self.resolution, train=True, augment=self.augment, normalization=self.normalization
+            )
             val_tf = build_transform(self.resolution, train=False, normalization=self.normalization)
             train_parts.append(ds.torch_dataset(Split.TRAIN, transform=train_tf))
             val_parts.append(ds.torch_dataset(Split.VAL, transform=val_tf))
@@ -141,18 +156,27 @@ class JointDataModule(pl.LightningDataModule):
         if self.gpu_augment is None:
             return batch
         x, y = batch
+        assert self.trainer is not None
         return self.gpu_augment(x, train=self.trainer.training), y
 
     def train_dataloader(self) -> DataLoader:
         return DataLoader(
-            self.train_ds, batch_size=self.batch_size, shuffle=True,
-            num_workers=self.workers, pin_memory=True, drop_last=True, persistent_workers=self.workers > 0,
+            self.train_ds,
+            batch_size=self.batch_size,
+            shuffle=True,
+            num_workers=self.workers,
+            pin_memory=True,
+            drop_last=True,
+            persistent_workers=self.workers > 0,
         )
 
     def val_dataloader(self) -> DataLoader:
         return DataLoader(
-            self.val_ds, batch_size=self.batch_size, num_workers=self.workers,
-            pin_memory=True, persistent_workers=self.workers > 0,
+            self.val_ds,
+            batch_size=self.batch_size,
+            num_workers=self.workers,
+            pin_memory=True,
+            persistent_workers=self.workers > 0,
         )
 
 
@@ -167,6 +191,8 @@ class LitChessQueriesModel(_ValMetricsMixin, pl.LightningModule):
     group at the unfreeze boundary; ``lr_floor`` stops the cosine anneal at a
     fraction of the peak LR instead of 0."""
 
+    class_weight: torch.Tensor
+
     def __init__(
         self,
         encoder_name: str = DEFAULT_ENCODER,
@@ -177,10 +203,10 @@ class LitChessQueriesModel(_ValMetricsMixin, pl.LightningModule):
         weight_decay: float = 0.05,
         empty_weight: float = 1.0,
         lr_schedule: str = Schedule.NONE,  # Schedule.NONE or Schedule.COSINE
-        warmup_epochs: int = 0,     # linear LR warmup length (epochs)
-        unfreeze_epoch: int = 0,    # staged unfreeze: encoder frozen until this epoch (0 = never freeze)
-        lr_floor: float = 0.0,      # cosine floor as a fraction of peak LR
-        aux_weight: float = 0.0,    # >0 enables piece-type + colour aux heads
+        warmup_epochs: int = 0,  # linear LR warmup length (epochs)
+        unfreeze_epoch: int = 0,  # staged unfreeze: encoder frozen until this epoch (0 = never freeze)
+        lr_floor: float = 0.0,  # cosine floor as a fraction of peak LR
+        aux_weight: float = 0.0,  # >0 enables piece-type + colour aux heads
         label_smoothing: float = 0.0,
         drop_path_rate: float = 0.0,  # encoder stochastic depth
         head_type: str = HeadType.QUERY,  # HeadType value; str accepted for ckpt hparams
@@ -191,20 +217,31 @@ class LitChessQueriesModel(_ValMetricsMixin, pl.LightningModule):
         # for the first phase of a staged unfreeze (``unfreeze_epoch > 0``).
         starts_frozen = freeze_encoder or unfreeze_epoch > 0
         self.model = ChessQueriesModel(
-            encoder_name=encoder_name, freeze_encoder=starts_frozen, decoder_layers=decoder_layers,
-            aux_heads=aux_weight > 0, drop_path_rate=drop_path_rate, head_type=head_type,
+            encoder_name=encoder_name,
+            freeze_encoder=starts_frozen,
+            decoder_layers=decoder_layers,
+            aux_heads=aux_weight > 0,
+            drop_path_rate=drop_path_rate,
+            head_type=head_type,
         )
         w = torch.ones(NUM_CLASSES)
         w[EMPTY_CLASS] = empty_weight
         self.register_buffer("class_weight", w)
         self._reset_val_buffers()
 
+    @property
+    def hparams(self) -> AttributeDict:
+        # save_hyperparameters() stores an AttributeDict; narrow the base's MutableMapping for attribute access.
+        return cast(AttributeDict, super().hparams)
+
     def forward(self, x):
         return self.model(x)
 
     def _loss(self, logits, labels):
         return nn.functional.cross_entropy(
-            logits.reshape(-1, NUM_CLASSES), labels.reshape(-1), weight=self.class_weight,
+            logits.reshape(-1, NUM_CLASSES),
+            labels.reshape(-1),
+            weight=self.class_weight,
             label_smoothing=self.hparams.label_smoothing,
         )
 
@@ -215,8 +252,11 @@ class LitChessQueriesModel(_ValMetricsMixin, pl.LightningModule):
             loss = self._loss(out["main"], y)
             type_t = self.model.label_to_type[y]
             color_t = self.model.label_to_color[y]
-            aux = (nn.functional.cross_entropy(out["type"].reshape(-1, out["type"].shape[-1]), type_t.reshape(-1))
-                   + nn.functional.cross_entropy(out["color"].reshape(-1, out["color"].shape[-1]), color_t.reshape(-1)))
+            aux = nn.functional.cross_entropy(
+                out["type"].reshape(-1, out["type"].shape[-1]), type_t.reshape(-1)
+            ) + nn.functional.cross_entropy(
+                out["color"].reshape(-1, out["color"].shape[-1]), color_t.reshape(-1)
+            )
             loss = loss + self.hparams.aux_weight * aux
             self.log("train_aux", aux, prog_bar=False)
         else:
@@ -268,14 +308,20 @@ class LitChessQueriesModel(_ValMetricsMixin, pl.LightningModule):
         if schedule is not Schedule.COSINE:
             return opt
         # Epoch settings become step counts, so warmups ramp per batch instead of jumping per epoch
-        steps_per_epoch = max(1, self.trainer.estimated_stepping_batches // self.trainer.max_epochs)
-        total = self.trainer.max_epochs * steps_per_epoch
+        max_epochs = self.trainer.max_epochs
+        assert max_epochs is not None
+        steps_per_epoch = max(1, int(self.trainer.estimated_stepping_batches // max_epochs))
+        total = max_epochs * steps_per_epoch
         warm, floor = self.hparams.warmup_epochs * steps_per_epoch, self.hparams.lr_floor
-        lr_lambdas = [
-            (lambda start: lambda s: _warmup_cosine_factor(
-                s, start_step=start, warmup_steps=warm, total_steps=total, floor=floor))(e * steps_per_epoch)
+        lr_lambdas: list[Callable[[int], float]] = [
+            (
+                lambda start: (
+                    lambda s: _warmup_cosine_factor(
+                        s, start_step=start, warmup_steps=warm, total_steps=total, floor=floor
+                    )
+                )
+            )(e * steps_per_epoch)
             for e in group_starts
         ]
         sched = torch.optim.lr_scheduler.LambdaLR(opt, lr_lambda=lr_lambdas)
         return {"optimizer": opt, "lr_scheduler": {"scheduler": sched, "interval": "step"}}
-

@@ -4,9 +4,12 @@ Two normalization regimes (see :class:`Normalization`): the project default
 (ImageNet stats, used by the ViT models) and ChessReD's own preprocessing — a
 ``ToPILImage`` round-trip + their channel stats — kept bit-faithful so the
 ResNeXt baseline trains/evaluates exactly as Masouris & van Gemert (VISAPP 2024)."""
+
 from __future__ import annotations
 
+from collections.abc import Callable
 from enum import Enum
+from typing import Any, TypedDict
 
 from torchvision import transforms
 
@@ -40,7 +43,13 @@ class Augment(str, Enum):
     GEOMETRIC_MILD = "geometric_mild"
 
 
-_GEOMETRIC_PRESETS = {
+class GeometricPreset(TypedDict):
+    rotation: float
+    perspective: float
+    scale: tuple[float, float]
+
+
+_GEOMETRIC_PRESETS: dict[Augment, GeometricPreset] = {
     Augment.GEOMETRIC: dict(rotation=180, perspective=0.5, scale=(0.7, 1.1)),
     Augment.GEOMETRIC_MILD: dict(rotation=45, perspective=0.3, scale=(0.85, 1.1)),
 }
@@ -58,13 +67,15 @@ def build_transform(
         # (load-bearing — the exact op the released weights were trained with) +
         # their channel stats. Their recipe used NO augmentation, so train/val are
         # identical here; `train`/`augment` are deliberately ignored.
-        return transforms.Compose([
-            transforms.Resize((resolution, resolution), antialias=None),
-            transforms.ToPILImage(),
-            transforms.ToTensor(),
-            transforms.Normalize(CHESSRED_MEAN, CHESSRED_STD),
-        ])
-    ops = [
+        return transforms.Compose(
+            [
+                transforms.Resize((resolution, resolution), antialias=None),
+                transforms.ToPILImage(),
+                transforms.ToTensor(),
+                transforms.Normalize(CHESSRED_MEAN, CHESSRED_STD),
+            ]
+        )
+    ops: list[Callable[..., Any]] = [
         transforms.Lambda(lambda x: x / 255.0),
         transforms.Resize((resolution, resolution), antialias=True),
     ]
@@ -74,7 +85,9 @@ def build_transform(
             ops += [
                 transforms.RandomApply([transforms.RandomRotation(g["rotation"], fill=0)], p=0.9),
                 transforms.RandomPerspective(distortion_scale=g["perspective"], p=0.7, fill=0),
-                transforms.RandomAffine(degrees=0, translate=(0.08, 0.08), scale=g["scale"], fill=0),
+                transforms.RandomAffine(
+                    degrees=0, translate=(0.08, 0.08), scale=g["scale"], fill=0
+                ),
             ]
         # Photometric jitter applies in all presets except NONE.
         if augment is not Augment.NONE:

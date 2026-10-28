@@ -3,6 +3,7 @@
 A recognizer maps a batch of images to per-square class ids (our canonical
 label space).
 """
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod

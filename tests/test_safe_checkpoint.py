@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 import pytest
 import torch
 from safetensors import safe_open
@@ -44,7 +46,7 @@ def test_load_safetensors_reconstructs_and_strictly_loads(tmp_path, monkeypatch)
     save_file({"weight": expected}, path, metadata=_metadata())
     monkeypatch.setattr(checkpoint, "ChessQueriesModel", _TinyModel)
 
-    model = checkpoint.load_safetensors_model(path)
+    model = cast(_TinyModel, checkpoint.load_safetensors_model(path))
 
     assert torch.equal(model.weight, expected)
     assert _TinyModel.last_kwargs == {
@@ -79,7 +81,7 @@ def test_fp16_loading(tmp_path, monkeypatch):
     save_file({"weight": expected}, path, metadata=_metadata(precision="fp16"))
     monkeypatch.setattr(checkpoint, "ChessQueriesModel", _TinyModel)
 
-    model = checkpoint.load_safetensors_model(path)
+    model = cast(_TinyModel, checkpoint.load_safetensors_model(path))
     assert model.weight.dtype == torch.float16
     assert torch.equal(model.weight, expected)
 

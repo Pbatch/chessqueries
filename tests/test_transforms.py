@@ -35,8 +35,12 @@ def test_mild_is_gentler_than_aggressive():
 def test_none_augment_matches_eval_pipeline():
     # The no-augmentation ablation ("none") must make the train transform
     # identical to eval: no geometric ops and no photometric jitter.
-    train_ops = [type(op).__name__ for op in build_transform(56, train=True, augment="none").transforms]
-    eval_ops = [type(op).__name__ for op in build_transform(56, train=False, augment="none").transforms]
+    train_ops = [
+        type(op).__name__ for op in build_transform(56, train=True, augment="none").transforms
+    ]
+    eval_ops = [
+        type(op).__name__ for op in build_transform(56, train=False, augment="none").transforms
+    ]
     assert train_ops == eval_ops
     assert "ColorJitter" not in train_ops
 

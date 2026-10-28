@@ -1,4 +1,5 @@
 """Recognition metrics."""
+
 from chessqueries.metrics.recognition import (
     BoardMetrics,
     aggregate,

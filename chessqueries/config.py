@@ -3,6 +3,7 @@
 Values load from `.env` (via pydantic-settings) and the process environment.
 Everything is anchored to the repo root so paths work regardless of cwd.
 """
+
 from functools import lru_cache
 from pathlib import Path
 
@@ -35,6 +36,11 @@ class Settings(BaseSettings):
     @property
     def chesscam_root(self) -> Path:
         return self.DATA_ROOT / "chesscam"
+
+    @property
+    def synthetic_root(self) -> Path:
+        # Renders from synthetic/render.py; data/synthetic holds only the FEN lists they came from
+        return self.DATA_ROOT / "synthetic_5k"
 
 
 @lru_cache(maxsize=1)

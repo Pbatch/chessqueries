@@ -1,6 +1,7 @@
 """Dataset loaders. Every dataset subclasses :class:`ChessDataset` and yields a
 common :class:`BoardSample`. Importing this package registers all datasets.
 """
+
 from chessqueries.data.base import (
     BoardImageDataset,
     BoardSample,
@@ -17,6 +18,7 @@ from chessqueries.data.chesscog import ChessCog
 from chessqueries.data.chessred import ChessReD
 from chessqueries.data.cvchess import CVChess, Viewpoint
 from chessqueries.data.slcc import SLCC
+from chessqueries.data.synthetic import Synthetic
 
 __all__ = [
     "BoardImageDataset",
@@ -30,6 +32,7 @@ __all__ = [
     "DatasetIncompleteError",
     "DatasetLoad",
     "SLCC",
+    "Synthetic",
     "Viewpoint",
     "DATASET_REGISTRY",
     "DatasetName",

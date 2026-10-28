@@ -3,6 +3,7 @@
 Each function is idempotent. File downloads use a ``.part`` path and become
 visible at their final path only after any available SHA-256 check succeeds.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -26,9 +27,7 @@ CHESSRED_ANNOTATIONS_URL = (
     "https://data.4tu.nl/file/99b5c721-280b-450b-b058-b2900b69a90f/"
     "3cae6364-daca-4967-b426-1e4b68cdb64c"
 )
-CHESSRED_ANNOTATIONS_SHA256 = (
-    "16e99d7e8535c0fc56507caa2aa5f7594d7ca076ebab3f5a432cfd4aa10668cc"
-)
+CHESSRED_ANNOTATIONS_SHA256 = "16e99d7e8535c0fc56507caa2aa5f7594d7ca076ebab3f5a432cfd4aa10668cc"
 # We use the authors' offline-resized 1024x1024 images (Google Drive zip), not
 # the raw 3072x3072 4TU images: these are the exact inputs the ChessReD baseline
 # was trained on, the only ones that reproduce the paper, and what we train our
@@ -44,10 +43,12 @@ CHESSCOG_OSF_PROJECT = "xf3ka"
 CHESSCOG_SPLIT_COUNTS = {
     split.value: count
     for split, count in FROZEN_SAMPLE_COUNTS[DatasetName.CHESSCOG].items()
+    if split is not None
 }
 
 # --- CVChess (Google Drive folder) ----------------------------------------- #
 CVCHESS_GDRIVE_FOLDER_ID = "1lxS3GpYvDLU_1a9oqzIRlNmJUSYbmGZp"
+
 
 class _ArchiveValidationError(RuntimeError):
     """A downloaded archive is readable enough to inspect but is invalid."""
@@ -113,9 +114,10 @@ def _download(url: str, dest: Path, expected_sha256: str | None = None) -> Path:
     with requests.get(url, stream=True, timeout=60) as r:
         r.raise_for_status()
         total = int(r.headers.get("content-length", 0))
-        with open(part, "wb") as f, tqdm(
-            total=total, unit="B", unit_scale=True, desc=dest.name
-        ) as bar:
+        with (
+            open(part, "wb") as f,
+            tqdm(total=total, unit="B", unit_scale=True, desc=dest.name) as bar,
+        ):
             for chunk in r.iter_content(chunk_size=1 << 20):
                 if chunk:
                     f.write(chunk)
@@ -123,9 +125,7 @@ def _download(url: str, dest: Path, expected_sha256: str | None = None) -> Path:
     return _finish_part(part, dest, expected_sha256)
 
 
-def _download_gdrive(
-    file_id: str, dest: Path, expected_sha256: str | None = None
-) -> Path:
+def _download_gdrive(file_id: str, dest: Path, expected_sha256: str | None = None) -> Path:
     import gdown
 
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -143,9 +143,7 @@ def _download_gdrive(
     )
     if result is None:
         raise RuntimeError(f"Google Drive download failed for {dest.name}")
-    return _finish_part(
-        part, dest, expected_sha256, discard_hash_mismatch=True
-    )
+    return _finish_part(part, dest, expected_sha256, discard_hash_mismatch=True)
 
 
 def _extract_zip(zip_path: Path, out_dir: Path, expected_root: str) -> None:
@@ -159,9 +157,7 @@ def _extract_zip(zip_path: Path, out_dir: Path, expected_root: str) -> None:
         with zipfile.ZipFile(zip_path) as zf:
             corrupt = zf.testzip()
             if corrupt is not None:
-                raise _ArchiveValidationError(
-                    f"corrupt member in {zip_path}: {corrupt}"
-                )
+                raise _ArchiveValidationError(f"corrupt member in {zip_path}: {corrupt}")
             for name in tqdm(zf.namelist(), desc="extract", unit="file"):
                 zf.extract(name, stage)
         extracted = stage / expected_root
@@ -184,15 +180,19 @@ def _extract_zip(zip_path: Path, out_dir: Path, expected_root: str) -> None:
         shutil.rmtree(stage, ignore_errors=True)
 
 
-def _paired_file_count(directory: Path, annotation_suffix: str, image_suffix: str) -> int:
+def _paired_file_count(directory: Path, annotation_suffix: str, *image_suffixes: str) -> int:
     annotations = {path.stem for path in directory.glob(f"*{annotation_suffix}")}
-    images = {path.stem for path in directory.glob(f"*{image_suffix}")}
+    images = {path.stem for suffix in image_suffixes for path in directory.glob(f"*{suffix}")}
     return len(annotations) if annotations == images else -1
+
+
+# The renders ship as PNG; data/chesscog's have been converted to quality-95 JPEG in place
+CHESSCOG_IMAGE_SUFFIXES = (".png", ".jpg")
 
 
 def _chesscog_complete(render: Path) -> bool:
     return all(
-        _paired_file_count(render / split, ".json", ".png") == expected
+        _paired_file_count(render / split, ".json", *CHESSCOG_IMAGE_SUFFIXES) == expected
         for split, expected in CHESSCOG_SPLIT_COUNTS.items()
     )
 
@@ -250,9 +250,7 @@ def download_chesscog(dataroot: Path | None = None) -> Path:
 
     # 1. Clone OSF storage away from the final tree, then install its archives.
     render.mkdir(parents=True, exist_ok=True)
-    clone_stage = Path(
-        tempfile.mkdtemp(prefix=".chesscog-download.part-", dir=dataroot.parent)
-    )
+    clone_stage = Path(tempfile.mkdtemp(prefix=".chesscog-download.part-", dir=dataroot.parent))
     try:
         args = SimpleNamespace(
             project=CHESSCOG_OSF_PROJECT,
@@ -290,7 +288,7 @@ def download_chesscog(dataroot: Path | None = None) -> Path:
             (render / f).unlink(missing_ok=True)
     if not _chesscog_complete(render):
         counts = {
-            split: _paired_file_count(render / split, ".json", ".png")
+            split: _paired_file_count(render / split, ".json", *CHESSCOG_IMAGE_SUFFIXES)
             for split in CHESSCOG_SPLIT_COUNTS
         }
         raise RuntimeError(

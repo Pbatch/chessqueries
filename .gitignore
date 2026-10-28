@@ -40,9 +40,6 @@ venv/
 # Vendored external repos (cloned for the ChessCog comparison; env + models live outside git)
 /third_party/
 
-# Paper: its own git repo, tracked separately from the ML code (never a chessqueries PR)
-/paper/
-
 # Jupyter
 .ipynb_checkpoints/
 notebooks/*-checkpoint.ipynb
@@ -54,9 +51,3 @@ notebooks/*-checkpoint.ipynb
 *.swp
 .DS_Store
 Thumbs.db
-
-# Local-only: GPU/queue-specific experiment watchdog (machine-specific paths)
-/scripts/exp_watchdog.py
-
-# Supplementary export (scripts/make_supplementary.sh)
-/chessqueries-supplementary.zip

@@ -1,4 +1,5 @@
 """ChessReD dataset (4TU.ResearchData): real smartphone photos."""
+
 from __future__ import annotations
 
 import json
@@ -19,12 +20,18 @@ IMAGE_SIZE = 1024
 # ChessReD category names -> Piece.
 CATEGORY_TO_PIECE: dict[str, Piece] = {
     "empty": Piece.EMPTY,
-    "white-pawn": Piece.WHITE_PAWN, "white-knight": Piece.WHITE_KNIGHT,
-    "white-bishop": Piece.WHITE_BISHOP, "white-rook": Piece.WHITE_ROOK,
-    "white-queen": Piece.WHITE_QUEEN, "white-king": Piece.WHITE_KING,
-    "black-pawn": Piece.BLACK_PAWN, "black-knight": Piece.BLACK_KNIGHT,
-    "black-bishop": Piece.BLACK_BISHOP, "black-rook": Piece.BLACK_ROOK,
-    "black-queen": Piece.BLACK_QUEEN, "black-king": Piece.BLACK_KING,
+    "white-pawn": Piece.WHITE_PAWN,
+    "white-knight": Piece.WHITE_KNIGHT,
+    "white-bishop": Piece.WHITE_BISHOP,
+    "white-rook": Piece.WHITE_ROOK,
+    "white-queen": Piece.WHITE_QUEEN,
+    "white-king": Piece.WHITE_KING,
+    "black-pawn": Piece.BLACK_PAWN,
+    "black-knight": Piece.BLACK_KNIGHT,
+    "black-bishop": Piece.BLACK_BISHOP,
+    "black-rook": Piece.BLACK_ROOK,
+    "black-queen": Piece.BLACK_QUEEN,
+    "black-king": Piece.BLACK_KING,
 }
 
 
@@ -55,6 +62,7 @@ class ChessReD(ChessDataset):
         self.dataroot = Path(dataroot) if dataroot else get_config().chessred_root
 
     def _load_samples(self, split: Split | None) -> list[BoardSample]:
+        assert split is not None  # _validate_split requires one
         ann = load_annotations(self.dataroot)
         split_ids = set(ann["splits"][split.value]["image_ids"])
         cat_name = {c["id"]: c["name"] for c in ann["categories"]}

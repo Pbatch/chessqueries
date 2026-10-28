@@ -1,4 +1,5 @@
 """Board squares and the FEN-order indexing convention (a8=0 … h1=63)."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

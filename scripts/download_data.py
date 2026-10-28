@@ -5,6 +5,7 @@ Usage:
     uv run python scripts/download_data.py chesscog cvchess
     uv run python scripts/download_data.py all
 """
+
 import argparse
 
 from chessqueries.data import download as dl
@@ -12,7 +13,9 @@ from chessqueries.data.base import DatasetName
 
 
 def main(argv: list[str] | None = None) -> None:
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     p.add_argument(
         "datasets",
         nargs="+",

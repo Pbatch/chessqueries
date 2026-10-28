@@ -25,6 +25,7 @@ Resume a stopped run from its last checkpoint with the same run name and setting
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import modal
 
@@ -69,11 +70,15 @@ with image.imports():
 class ModalChessQueriesTrainer:
     @modal.method()
     def train(self, config: dict) -> None:
-        ChessQueriesTrainingJob(TrainingConfig(**config), Path("/mnt/chessqueries"), volume.commit).run()
+        ChessQueriesTrainingJob(
+            TrainingConfig(**config), Path("/mnt/chessqueries"), volume.commit
+        ).run()
 
     @modal.method()
     def evaluate(self, config: dict) -> dict:
-        return ChessQueriesTrainingJob(TrainingConfig(**config), Path("/mnt/chessqueries"), volume.commit).evaluate_only()
+        return ChessQueriesTrainingJob(
+            TrainingConfig(**config), Path("/mnt/chessqueries"), volume.commit
+        ).evaluate_only()
 
 
 @app.local_entrypoint()
@@ -87,7 +92,7 @@ def main(  # noqa: PLR0913
     precision: str = "bf16-mixed",
     resolution: int = 448,
     encoder: str = "vit_small_patch16_dinov3.lvd1689m",
-    datasets: str = "chessred,chesscog,chesscam,slcc",
+    datasets: str = "chessred,chesscog,chesscam,slcc,synthetic",
     learning_rate: float = 1.4e-4,
     encoder_learning_rate: float = 1.4e-5,
     warmup_epochs: int = 3,
@@ -102,7 +107,7 @@ def main(  # noqa: PLR0913
     wandb_project: str = "chessqueries",
     wandb_entity: str = "",
 ) -> None:
-    config = {
+    config: dict[str, Any] = {
         "dataset": dataset,
         "run_name": run_name,
         "epochs": epochs,
@@ -130,7 +135,8 @@ def main(  # noqa: PLR0913
         raise ValueError("--evaluate-only scores --init-weights, so pass them")
     submission_dir = Path("data/modal-runs")
     submission_dir.mkdir(parents=True, exist_ok=True)
-    trainer = ModalChessQueriesTrainer.with_options(gpu=gpu)()
+    # app.cls is typed as returning the plain class; at runtime it is a modal.Cls
+    trainer = ModalChessQueriesTrainer.with_options(gpu=gpu)()  # ty: ignore[unresolved-attribute]
     call = (trainer.evaluate if evaluate_only else trainer.train).spawn(config)
     dashboard_url = app.get_dashboard_url()
     print(f"Submitted training run: {run_name}")

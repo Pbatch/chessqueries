@@ -23,25 +23,25 @@ litert-torch pins its own torch, so this runs outside the project venv:
         checkpoints/lite-ft-chesscam-v2/lite-ft-chesscam-v2-last.safetensors \
         ../CameraChessWeb/public/chessqueries_lite.tflite
 """
+
+import argparse
 import math
 import sys
 import time
-import types
+from collections.abc import Sequence
 from pathlib import Path
+from typing import Any, cast
 
 import numpy as np
 import torch
-from timm.layers import resample_abs_pos_embed
 from torch import nn
 from torch.nn import functional as F
 
 repo = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(repo))
-# Skip chessqueries.models.__init__, which pulls in the LLM baselines and their dependencies
-models_pkg = types.ModuleType("chessqueries.models")
-models_pkg.__path__ = [str(repo / "chessqueries" / "models")]
-sys.modules["chessqueries.models"] = models_pkg
+from chessqueries.models.browser import RGBANormalize, bake_pos_embed  # noqa: E402
 from chessqueries.models.checkpoint import load_safetensors_model, read_safetensors_metadata  # noqa: E402
+from chessqueries.models.chessqueries_model import ChessQueriesModel  # noqa: E402
 
 import litert_torch  # noqa: E402
 import tflite  # noqa: E402
@@ -49,8 +49,6 @@ from ai_edge_litert.interpreter import Interpreter  # noqa: E402
 from litert_torch.backend.composite import StableHLOCompositeBuilder  # noqa: E402
 from litert_torch.generative.quantize import quant_recipes  # noqa: E402
 
-MEAN = [0.485, 0.456, 0.406]
-STD = [0.229, 0.224, 0.225]
 # The WebGPU delegate (LiteRT.js 2.5.3 and 2.6.0) fails to compile a model with more than 7
 # attention composites ("STABLEHLO_COMPOSITE failed to prepare"), so only the first 7 encoder
 # blocks use fused_attention
@@ -66,14 +64,7 @@ class BrowserModel(nn.Module):
     def __init__(self, model: nn.Module) -> None:
         super().__init__()
         self.model = model
-        self.register_buffer("mean", 255.0 * torch.tensor(MEAN).view(1, 3, 1, 1))
-        self.register_buffer("std", 255.0 * torch.tensor(STD).view(1, 3, 1, 1))
-
-    def normalize(self, image: torch.Tensor) -> torch.Tensor:
-        # Cast before anything else, so the input feeds only a CAST, the one op whose input
-        # type set_input_uint8 can change
-        x = image.float()[..., :3].permute(0, 3, 1, 2)
-        return (x - self.mean) / self.std
+        self.normalize = RGBANormalize()
 
     def forward(self, image: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         logits, centroids = self.model(self.normalize(image))
@@ -84,7 +75,9 @@ class BrowserModel(nn.Module):
 class ReferenceModel(nn.Module):
     """The original model, with the centroids from its last decoder layer's attention weights."""
 
-    def __init__(self, recognizer: nn.Module, grid_xy: torch.Tensor) -> None:
+    grid_xy: torch.Tensor
+
+    def __init__(self, recognizer: ChessQueriesModel, grid_xy: torch.Tensor) -> None:
         super().__init__()
         self.recognizer = recognizer
         self.register_buffer("grid_xy", grid_xy)
@@ -96,17 +89,25 @@ class ReferenceModel(nn.Module):
             out, w = last.multihead_attn(x, mem, mem, need_weights=True, average_attn_weights=True)
             self.weights.append(w)
             return last.dropout2(out)
+
         last._mha_block = mha
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         self.weights.clear()
         logits = self.recognizer(x)
-        w = self.weights[0][0, :, self.num_prefix_tokens:]
+        w = self.weights[0][0, :, self.num_prefix_tokens :]
         return logits[0], (w @ self.grid_xy) / w.sum(-1, keepdim=True)
 
 
-def attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, heads: int, scale: float,
-              need_weights: bool = False, shrink: float = 1.0) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+def attention(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    heads: int,
+    scale: float,
+    need_weights: bool = False,
+    shrink: float = 1.0,
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """Multi-head attention on 2D (N, C) queries and (M, C) keys/values, all heads at once on
     3D (heads, tokens, d) tensors, so no tensor goes above 3D (the delegate rejects
     timm/PyTorch's 5D split). About 20% less GPU time than one matmul per head channel slice.
@@ -130,7 +131,9 @@ def attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, heads: int, sca
     return (out, probs.mean(0)) if need_weights else out
 
 
-def fused_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, heads: int, scale: float) -> torch.Tensor:
+def fused_attention(
+    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, heads: int, scale: float
+) -> torch.Tensor:
     """Multi-head attention on 2D (N, C) queries and (M, C) keys/values, as one
     odml.scaled_dot_product_attention composite, which the WebGPU delegate runs as a single
     fused op without writing out the (heads, N, M) scores. About 30% less GPU time than
@@ -149,9 +152,15 @@ def fused_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, heads: in
     m = k.shape[0]
     d = c // heads
     q = q * scale
-    builder = StableHLOCompositeBuilder(name="odml.scaled_dot_product_attention", attr={"scale": 1.0})
-    qh, kh, vh = builder.mark_inputs(q.reshape(1, n, heads, d), k.reshape(1, m, heads, d), v.reshape(1, m, heads, d))
-    out = F.scaled_dot_product_attention(qh.transpose(1, 2), kh.transpose(1, 2), vh.transpose(1, 2), scale=1.0)
+    builder = StableHLOCompositeBuilder(
+        name="odml.scaled_dot_product_attention", attr={"scale": 1.0}
+    )
+    qh, kh, vh = builder.mark_inputs(
+        q.reshape(1, n, heads, d), k.reshape(1, m, heads, d), v.reshape(1, m, heads, d)
+    )
+    out = F.scaled_dot_product_attention(
+        qh.transpose(1, 2), kh.transpose(1, 2), vh.transpose(1, 2), scale=1.0
+    )
     return builder.mark_outputs(out.transpose(1, 2)).reshape(n, c)
 
 
@@ -172,13 +181,24 @@ def power_of_two_above(ratio: float) -> float:
 class InProjection(nn.Module):
     """The q/k/v projections of an nn.MultiheadAttention as separate linear maps."""
 
+    q_weight: torch.Tensor
+    q_bias: torch.Tensor
+    k_weight: torch.Tensor
+    k_bias: torch.Tensor
+    v_weight: torch.Tensor
+    v_bias: torch.Tensor
+
     def __init__(self, mha: nn.MultiheadAttention) -> None:
         super().__init__()
         assert mha.batch_first and mha._qkv_same_embed_dim
         c = mha.embed_dim
         for i, name in enumerate("qkv"):
-            self.register_buffer(f"{name}_weight", mha.in_proj_weight[i * c:(i + 1) * c].detach().clone())
-            self.register_buffer(f"{name}_bias", mha.in_proj_bias[i * c:(i + 1) * c].detach().clone())
+            self.register_buffer(
+                f"{name}_weight", mha.in_proj_weight[i * c : (i + 1) * c].detach().clone()
+            )
+            self.register_buffer(
+                f"{name}_bias", mha.in_proj_bias[i * c : (i + 1) * c].detach().clone()
+            )
         self.out_proj = mha.out_proj
         self.heads = mha.num_heads
         self.scale = (c // mha.num_heads) ** -0.5
@@ -186,10 +206,17 @@ class InProjection(nn.Module):
     def project(self, name: str, x: torch.Tensor) -> torch.Tensor:
         return F.linear(x, getattr(self, f"{name}_weight"), getattr(self, f"{name}_bias"))
 
-    def forward(self, query: torch.Tensor, memory: torch.Tensor,
-                need_weights: bool = False) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        out = attention(self.project("q", query), self.project("k", memory), self.project("v", memory),
-                        self.heads, self.scale, need_weights)
+    def forward(
+        self, query: torch.Tensor, memory: torch.Tensor, need_weights: bool = False
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        out = attention(
+            self.project("q", query),
+            self.project("k", memory),
+            self.project("v", memory),
+            self.heads,
+            self.scale,
+            need_weights,
+        )
         if need_weights:
             return self.out_proj(out[0]), out[1]
         return self.out_proj(out)
@@ -211,14 +238,23 @@ class ChessQueries2D(nn.Module):
     - its residual add has a constant (64, C) operand, which the delegate lays out wrongly
       (wrong boards); the add is done on a single (1, 64 * C) row instead."""
 
-    def __init__(self, recognizer: nn.Module, grid_xy: torch.Tensor) -> None:
+    grid_xy: torch.Tensor
+    rope_sin: torch.Tensor
+    rope_cos: torch.Tensor
+    first_x: torch.Tensor
+    first_scores_weight: torch.Tensor
+    first_scores_bias: torch.Tensor
+
+    def __init__(self, recognizer: ChessQueriesModel, grid_xy: torch.Tensor) -> None:
         super().__init__()
         self.encoder = recognizer.encoder
         # Patch centres in [0, 1] input coordinates, (patches, 2)
         self.register_buffer("grid_xy", grid_xy)
         self.norm, self.head = recognizer.norm, recognizer.head
-        self.decoder_layers = recognizer.decoder.layers
-        assert recognizer.decoder.norm is None and not any(l.norm_first for l in self.decoder_layers)
+        self.decoder_layers = cast(Sequence[nn.TransformerDecoderLayer], recognizer.decoder.layers)
+        assert recognizer.decoder.norm is None and not any(
+            layer.norm_first for layer in self.decoder_layers
+        )
         for block in self.encoder.blocks:
             attn = block.attn
             assert isinstance(attn.q_norm, nn.Identity) and isinstance(attn.k_norm, nn.Identity)
@@ -230,10 +266,14 @@ class ChessQueries2D(nn.Module):
         # scores of the blocks in score_shrink are computed shrunk (see attention)
         self.residual_scale = 1.0
         self.score_shrink: dict[int, float] = {}
-        self.self_attn = nn.ModuleList(InProjection(l.self_attn) for l in self.decoder_layers)
-        self.cross_attn = nn.ModuleList(InProjection(l.multihead_attn) for l in self.decoder_layers)
+        self.self_attn = nn.ModuleList(
+            InProjection(layer.self_attn) for layer in self.decoder_layers
+        )
+        self.cross_attn = nn.ModuleList(
+            InProjection(layer.multihead_attn) for layer in self.decoder_layers
+        )
 
-        first, cross = self.decoder_layers[0], self.cross_attn[0]
+        first, cross = self.decoder_layers[0], cast(InProjection, self.cross_attn[0])
         with torch.no_grad():
             queries = recognizer.queries(1)[0]  # (64, C)
             x = first.norm1(queries + self.self_attn[0](queries, queries))
@@ -255,7 +295,7 @@ class ChessQueries2D(nn.Module):
         heads. Prefix tokens are not rotated: cos 1, sin 0."""
         enc = self.encoder
         assert enc.blocks[0].attn.rotate_half and not getattr(enc, "rope_mixed", False)
-        grid = int(round(patches ** 0.5))
+        grid = int(round(patches**0.5))
         heads = enc.blocks[0].attn.num_heads
         with torch.no_grad():
             sin, cos = enc.rope.get_embed(shape=(grid, grid)).chunk(2, -1)  # (patches, d) each
@@ -271,7 +311,9 @@ class ChessQueries2D(nn.Module):
         rotated = torch.cat([-th[..., half:], th[..., :half]], dim=-1)
         # As rows: the delegate lays out a constant (N, C) operand of a mul wrongly, and on a 3D
         # view with the table broadcast over the heads too
-        out = t.reshape(1, -1) * self.rope_cos.reshape(1, -1) + rotated.reshape(1, -1) * self.rope_sin.reshape(1, -1)
+        out = t.reshape(1, -1) * self.rope_cos.reshape(1, -1) + rotated.reshape(
+            1, -1
+        ) * self.rope_sin.reshape(1, -1)
         return out.reshape(n, c)
 
     def embed(self, x: torch.Tensor) -> torch.Tensor:
@@ -288,9 +330,11 @@ class ChessQueries2D(nn.Module):
         """`norm` on the shrunk residual stream, with its eps shrunk to match, so the result is unchanged"""
         if self.residual_scale == 1.0:
             return norm(h)
-        return F.layer_norm(h, norm.normalized_shape, norm.weight, norm.bias, norm.eps / self.residual_scale ** 2)
+        return F.layer_norm(
+            h, norm.normalized_shape, norm.weight, norm.bias, norm.eps / self.residual_scale**2
+        )
 
-    def qkv(self, block: nn.Module, h: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def qkv(self, block: Any, h: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         attn = block.attn
         c = h.shape[-1]
         x = self.layer_norm(block.norm1, h)
@@ -298,7 +342,7 @@ class ChessQueries2D(nn.Module):
             qkv = F.linear(x, attn.qkv.weight, torch.cat((attn.q_bias, attn.k_bias, attn.v_bias)))
         else:
             qkv = attn.qkv(x)
-        q, k, v = qkv[:, :c], qkv[:, c:2 * c], qkv[:, 2 * c:]
+        q, k, v = qkv[:, :c], qkv[:, c : 2 * c], qkv[:, 2 * c :]
         if self.rope:
             q, k = self.rotate(q, attn.num_heads), self.rotate(k, attn.num_heads)
         return q, k, v
@@ -315,7 +359,9 @@ class ChessQueries2D(nn.Module):
             if i in fused:
                 out = fused_attention(q, k, v, attn.num_heads, attn.scale)
             else:
-                out = attention(q, k, v, attn.num_heads, attn.scale, shrink=self.score_shrink.get(i, 1.0))
+                out = attention(
+                    q, k, v, attn.num_heads, attn.scale, shrink=self.score_shrink.get(i, 1.0)
+                )
             h = h + layer_scale(block, 1, attn.proj(out), shrink)
             h = h + layer_scale(block, 2, block.mlp(self.layer_norm(block.norm2, h)), shrink)
         return self.layer_norm(enc.norm, h)
@@ -338,7 +384,9 @@ class ChessQueries2D(nn.Module):
             q, k, v = self.qkv(block, h)
             n, c = q.shape
             heads, d = attn.num_heads, c // attn.num_heads
-            scores = (q * attn.scale).reshape(n, heads, d).transpose(0, 1) @ k.reshape(n, heads, d).permute(1, 2, 0)
+            scores = (q * attn.scale).reshape(n, heads, d).transpose(0, 1) @ k.reshape(
+                n, heads, d
+            ).permute(1, 2, 0)
             ratio = float(scores.abs().max()) / FP16_LIMIT
             if ratio > 1:
                 shrink[i] = power_of_two_above(ratio)
@@ -349,13 +397,17 @@ class ChessQueries2D(nn.Module):
         # Sums of squares shrink with the square of the scale
         self.residual_scale = power_of_two_above((max(squares) / FP16_LIMIT) ** 0.5)
         self.score_shrink = shrink
-        print(f"fp16 ranges: max LayerNorm sum of squares {max(squares):.3g}, residual scale {self.residual_scale:g}, "
-              f"score shrink by block {shrink}")
+        print(
+            f"fp16 ranges: max LayerNorm sum of squares {max(squares):.3g}, residual scale {self.residual_scale:g}, "
+            f"score shrink by block {shrink}"
+        )
 
     def first_cross_attention(self, memory: torch.Tensor) -> torch.Tensor:
-        cross = self.cross_attn[0]
+        cross = cast(InProjection, self.cross_attn[0])
         v = cross.project("v", memory)
-        scores_t = F.linear(memory, self.first_scores_weight, self.first_scores_bias)  # (M, heads * 64)
+        scores_t = F.linear(
+            memory, self.first_scores_weight, self.first_scores_bias
+        )  # (M, heads * 64)
         m = memory.shape[0]
         d = v.shape[-1] // cross.heads
         n = scores_t.shape[-1] // cross.heads
@@ -372,7 +424,9 @@ class ChessQueries2D(nn.Module):
             if i == 0:
                 # As one row: the delegate lays out a constant (64, C) operand of an add wrongly
                 attended = self.first_cross_attention(memory)
-                h = layer.norm2((attended.reshape(1, -1) + self.first_x.reshape(1, -1)).reshape(attended.shape))
+                h = layer.norm2(
+                    (attended.reshape(1, -1) + self.first_x.reshape(1, -1)).reshape(attended.shape)
+                )
             else:
                 h = layer.norm1(h + self.self_attn[i](h, h))
                 if i == last:
@@ -382,7 +436,7 @@ class ChessQueries2D(nn.Module):
                 h = layer.norm2(h + out)
             h = layer.norm3(h + layer.linear2(layer.activation(layer.linear1(h))))
         # Prefix (CLS/register) tokens have no position, so they are left out and the rest renormalised
-        w = weights[:, self.encoder.num_prefix_tokens:]
+        w = weights[:, self.encoder.num_prefix_tokens :]
         centroids = torch.matmul(w, self.grid_xy) / w.sum(-1, keepdim=True)  # (64, 2)
         return self.head(self.norm(h)), centroids  # (64, 13), (64, 2)
 
@@ -416,23 +470,17 @@ def build_model(ckpt: Path) -> tuple[BrowserModel, int]:
     """The browser wrapper around the checkpoint, attention rewritten for the GPU delegate."""
     resolution = int(read_safetensors_metadata(ckpt)["resolution"])
     recognizer = load_safetensors_model(ckpt, device="cpu").float()
-    encoder = recognizer.encoder
-    grid = resolution // encoder.patch_embed.patch_size[0]
-    if encoder.pos_embed is not None:  # DINOv3 has only RoPE
-        encoder.pos_embed = nn.Parameter(resample_abs_pos_embed(
-            encoder.pos_embed, new_size=(grid, grid), old_size=encoder.patch_embed.grid_size,
-            num_prefix_tokens=0 if encoder.no_embed_class else encoder.num_prefix_tokens,
-        ), requires_grad=False)
-    encoder.patch_embed.grid_size = (grid, grid)
+    grid = bake_pos_embed(recognizer.encoder, resolution)
     torch.backends.mha.set_fastpath_enabled(False)
     centres = (torch.arange(grid, dtype=torch.float32) + 0.5) / grid
     ys, xs = torch.meshgrid(centres, centres, indexing="ij")
     grid_xy = torch.stack([xs.flatten(), ys.flatten()], dim=-1)  # row-major, as the patch tokens
-    model = BrowserModel(ChessQueries2D(recognizer, grid_xy)).eval()
+    rewritten = ChessQueries2D(recognizer, grid_xy)
+    model = BrowserModel(rewritten).eval()
     reference = BrowserModel(ReferenceModel(recognizer, grid_xy)).eval()
 
     sample = random_image(resolution)
-    model.model.fit_fp16(model.normalize(sample))
+    rewritten.fit_fp16(model.normalize(sample))
     with torch.no_grad():
         diffs = [float((r - m).abs().max()) for r, m in zip(reference(sample), model(sample))]
     print("2D rewrite: max |prob diff| %.2e, max |centroid diff| %.2e" % tuple(diffs))
@@ -441,14 +489,20 @@ def build_model(ckpt: Path) -> tuple[BrowserModel, int]:
 
 
 def main() -> None:
-    ckpt, out = Path(sys.argv[1]), Path(sys.argv[2])
-    model, resolution = build_model(ckpt)
+    p = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
+    p.add_argument("checkpoint", type=Path)
+    p.add_argument("output", type=Path)
+    args = p.parse_args()
+    out: Path = args.output
+
+    model, resolution = build_model(args.checkpoint)
     sample = (random_image(resolution),)
-    t = time.time()
+    start = time.time()
     edge = litert_torch.convert(model, sample, quant_config=quant_recipes.full_fp16_recipe())
+    out.parent.mkdir(parents=True, exist_ok=True)
     edge.export(str(out))
     set_input_uint8(out)
-    print(f"-> {out} ({out.stat().st_size / 1e6:.1f} MB) in {time.time() - t:.0f}s")
+    print(f"-> {out} ({out.stat().st_size / 1e6:.1f} MB) in {time.time() - start:.0f}s")
 
     with torch.no_grad():
         expected = [t.numpy() for t in model(*sample)]
@@ -459,11 +513,19 @@ def main() -> None:
     interpreter.set_tensor(input_details["index"], sample[0].numpy().astype(np.uint8))
     interpreter.invoke()
     # Output order is up to the converter, so match the outputs by shape
-    actual = {tuple(d["shape"]): interpreter.get_tensor(d["index"]) for d in interpreter.get_output_details()}
+    actual = {
+        tuple(d["shape"]): interpreter.get_tensor(d["index"])
+        for d in interpreter.get_output_details()
+    }
     probs, centroids = actual[expected[0].shape], actual[expected[1].shape]
-    print("max |prob diff| vs torch:", float(np.abs(expected[0] - probs).max()),
-          "argmax agree:", float((expected[0].argmax(-1) == probs.argmax(-1)).mean()),
-          "max |centroid diff|:", float(np.abs(expected[1] - centroids).max()))
+    print(
+        "max |prob diff| vs torch:",
+        float(np.abs(expected[0] - probs).max()),
+        "argmax agree:",
+        float((expected[0].argmax(-1) == probs.argmax(-1)).mean()),
+        "max |centroid diff|:",
+        float(np.abs(expected[1] - centroids).max()),
+    )
 
 
 if __name__ == "__main__":

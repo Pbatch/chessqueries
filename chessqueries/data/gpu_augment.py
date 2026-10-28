@@ -10,6 +10,7 @@ The random draws match the CPU presets (same probabilities, ranges and perspecti
 jitter, black fill), with two deliberate differences: one bilinear resample instead of three
 (two of them nearest), and the colour jitter order is drawn per batch rather than per image.
 """
+
 from __future__ import annotations
 
 import torch
@@ -53,7 +54,9 @@ def _homography(src: torch.Tensor, dst: torch.Tensor) -> torch.Tensor:
     return torch.cat([h, h.new_ones(batch, 1)], dim=1).reshape(batch, 3, 3)
 
 
-def sample_homographies(batch: int, width: int, height: int, preset: Augment, device) -> torch.Tensor:
+def sample_homographies(
+    batch: int, width: int, height: int, preset: Augment, device
+) -> torch.Tensor:
     """(B, 3, 3) forward maps, input pixel -> output pixel: rotation, then perspective, then affine"""
     params = _GEOMETRIC_PRESETS[preset]
     eye = torch.eye(3, device=device).expand(batch, 3, 3)
@@ -70,9 +73,14 @@ def sample_homographies(batch: int, width: int, height: int, preset: Augment, de
     rotation = torch.where(chance(ROTATION_P), _about_centre(rotation, width, height), eye)
 
     # Perspective: each corner pulled inwards by up to distortion * half the side, as torchvision draws it
-    reach = torch.tensor([params["perspective"] * (width // 2), params["perspective"] * (height // 2)], device=device)
-    corners = torch.tensor([[0, 0], [width - 1, 0], [width - 1, height - 1], [0, height - 1]],
-                           dtype=torch.float32, device=device).expand(batch, 4, 2)
+    reach = torch.tensor(
+        [params["perspective"] * (width // 2), params["perspective"] * (height // 2)], device=device
+    )
+    corners = torch.tensor(
+        [[0, 0], [width - 1, 0], [width - 1, height - 1], [0, height - 1]],
+        dtype=torch.float32,
+        device=device,
+    ).expand(batch, 4, 2)
     inward = torch.tensor([[1, 1], [-1, 1], [-1, -1], [1, -1]], dtype=torch.float32, device=device)
     moved = corners + inward * torch.rand(batch, 4, 2, device=device) * reach
     perspective = torch.where(chance(PERSPECTIVE_P), _homography(corners, moved), eye)
@@ -80,7 +88,11 @@ def sample_homographies(batch: int, width: int, height: int, preset: Augment, de
     # Affine: shift by up to TRANSLATE of each side, scale within the preset's range, always applied
     low, high = params["scale"]
     scale = low + torch.rand(batch, device=device) * (high - low)
-    shift = (torch.rand(batch, 2, device=device) * 2 - 1) * TRANSLATE * torch.tensor([width, height], device=device)
+    shift = (
+        (torch.rand(batch, 2, device=device) * 2 - 1)
+        * TRANSLATE
+        * torch.tensor([width, height], device=device)
+    )
     affine = torch.zeros(batch, 3, 3, device=device)
     affine[:, 0, 0], affine[:, 1, 1], affine[:, 2, 2] = scale, scale, 1
     affine = _about_centre(affine, width, height)
@@ -92,15 +104,23 @@ def sample_homographies(batch: int, width: int, height: int, preset: Augment, de
 def warp(images: torch.Tensor, homographies: torch.Tensor) -> torch.Tensor:
     """Apply forward pixel maps to (B, C, H, W) images; pixels from outside the image are black"""
     batch, _, height, width = images.shape
-    ys, xs = torch.meshgrid(torch.arange(height, device=images.device, dtype=torch.float32),
-                            torch.arange(width, device=images.device, dtype=torch.float32), indexing="ij")
+    ys, xs = torch.meshgrid(
+        torch.arange(height, device=images.device, dtype=torch.float32),
+        torch.arange(width, device=images.device, dtype=torch.float32),
+        indexing="ij",
+    )
     out = torch.stack([xs, ys, torch.ones_like(xs)], dim=-1).reshape(1, -1, 3)  # (1, H*W, 3)
     # Each output pixel samples the input where the inverse map sends it
     src = out @ torch.linalg.inv(homographies).transpose(1, 2)
     src = src[..., :2] / src[..., 2:].clamp_min(1e-8)
     grid = torch.stack([src[..., 0] / (width - 1), src[..., 1] / (height - 1)], dim=-1) * 2 - 1
-    return F.grid_sample(images, grid.reshape(batch, height, width, 2), mode="bilinear", padding_mode="zeros",
-                         align_corners=True)
+    return F.grid_sample(
+        images,
+        grid.reshape(batch, height, width, 2),
+        mode="bilinear",
+        padding_mode="zeros",
+        align_corners=True,
+    )
 
 
 def colour_jitter(images: torch.Tensor) -> torch.Tensor:
@@ -109,7 +129,7 @@ def colour_jitter(images: torch.Tensor) -> torch.Tensor:
     gray_weights = torch.tensor(GRAY, device=images.device).view(1, 3, 1, 1)
 
     def factor() -> torch.Tensor:
-        return (1 - JITTER + torch.rand(batch, 1, 1, 1, device=images.device) * 2 * JITTER)
+        return 1 - JITTER + torch.rand(batch, 1, 1, 1, device=images.device) * 2 * JITTER
 
     for step in torch.randperm(3).tolist():
         if step == 0:
@@ -126,6 +146,9 @@ def colour_jitter(images: torch.Tensor) -> torch.Tensor:
 
 class GpuAugment(nn.Module):
     """uint8 (B, 3, H, W) batches -> augmented (when training) and ImageNet-normalised float32"""
+
+    mean: torch.Tensor
+    std: torch.Tensor
 
     def __init__(self, augment: Augment | str = Augment.GEOMETRIC_MILD) -> None:
         super().__init__()

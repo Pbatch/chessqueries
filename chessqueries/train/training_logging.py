@@ -1,4 +1,5 @@
 """Persistent W&B run identity for resumable Modal training."""
+
 from __future__ import annotations
 
 import json

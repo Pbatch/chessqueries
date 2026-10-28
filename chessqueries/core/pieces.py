@@ -1,4 +1,5 @@
 """Piece vocabulary: colors, piece types, and the 13-class `Piece` enum."""
+
 from __future__ import annotations
 
 from enum import Enum, IntEnum
@@ -28,11 +29,21 @@ class PieceType(Enum):
 
 
 _TYPE_LETTER = {
-    PieceType.PAWN: "P", PieceType.KNIGHT: "N", PieceType.BISHOP: "B",
-    PieceType.ROOK: "R", PieceType.QUEEN: "Q", PieceType.KING: "K",
+    PieceType.PAWN: "P",
+    PieceType.KNIGHT: "N",
+    PieceType.BISHOP: "B",
+    PieceType.ROOK: "R",
+    PieceType.QUEEN: "Q",
+    PieceType.KING: "K",
 }
-_ORDER = [PieceType.PAWN, PieceType.KNIGHT, PieceType.BISHOP,
-          PieceType.ROOK, PieceType.QUEEN, PieceType.KING]
+_ORDER = [
+    PieceType.PAWN,
+    PieceType.KNIGHT,
+    PieceType.BISHOP,
+    PieceType.ROOK,
+    PieceType.QUEEN,
+    PieceType.KING,
+]
 
 
 class Piece(IntEnum):
@@ -72,9 +83,10 @@ class Piece(IntEnum):
 
     @property
     def symbol(self) -> str:
-        if self.is_empty:
+        piece_type = self.piece_type
+        if piece_type is None:
             return "."
-        letter = self.piece_type.letter
+        letter = piece_type.letter
         return letter if self.color is Color.WHITE else letter.lower()
 
     @classmethod

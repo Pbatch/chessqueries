@@ -5,6 +5,7 @@ the fraction of boards with all 64 squares correct. We also report the tolerance
 curve (boards with <= t wrong squares), occupancy/piece breakdowns, and the mean
 number of wrong squares (Hamming distance — a human-facing "squares to fix").
 """
+
 from __future__ import annotations
 
 from collections import defaultdict
@@ -29,9 +30,9 @@ def _as_ints(board: BoardLike) -> list[int]:
 class BoardMetrics:
     """Per-board scoring primitives (counts, not rates)."""
 
-    n_squares_correct: int          # out of 64
-    n_occupancy_correct: int        # squares with correct empty/occupied status
-    n_occupied_gt: int              # squares occupied in ground truth
+    n_squares_correct: int  # out of 64
+    n_occupancy_correct: int  # squares with correct empty/occupied status
+    n_occupied_gt: int  # squares occupied in ground truth
     n_piece_correct_given_occupied: int  # of n_occupied_gt, class fully correct
 
     @property
@@ -100,7 +101,9 @@ def aggregate(
         "board_accuracy": sum(s.exact for s in scores) / n,
         "per_square_accuracy": tot_sq / (64 * n),
         "occupancy_accuracy": tot_occ / (64 * n),
-        "piece_accuracy_given_occupied": (tot_piece / tot_occupied) if tot_occupied else float("nan"),
+        "piece_accuracy_given_occupied": (tot_piece / tot_occupied)
+        if tot_occupied
+        else float("nan"),
         "mean_wrong_squares": tot_wrong / n,
     }
     for t in tolerances:

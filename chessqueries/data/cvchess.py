@@ -1,4 +1,5 @@
 """CVChess dataset: images plus FENs recovered from the vendored labels."""
+
 from __future__ import annotations
 
 import json

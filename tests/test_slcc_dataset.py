@@ -1,4 +1,5 @@
 """SLCC loader + split planner (no pixels/network)."""
+
 import json
 
 import pytest
@@ -11,13 +12,20 @@ from chessqueries.data.slcc import MANIFEST_NAME, SLCC, SplitRatio, plan_splits
 FEN = "3b4/3B2k1/5pb1/p1pN3p/P1P1P2P/1P3K2/8/8 b - - 2 65"
 
 
-def _rec(
-    sid: str, split: str, video_id: str = "vidA", game_id: str = "g"
-) -> dict:
-    return {"image": f"images/{sid}.jpg", "gt_fen": FEN, "split": split,
-            "video_id": video_id, "game_id": game_id, "ply": 1, "side_to_move": "b",
-            "players": ["W", "B"], "template_id": "t", "confidence": 0.9,
-            "verified_by_human": True}
+def _rec(sid: str, split: str, video_id: str = "vidA", game_id: str = "g") -> dict:
+    return {
+        "image": f"images/{sid}.jpg",
+        "gt_fen": FEN,
+        "split": split,
+        "video_id": video_id,
+        "game_id": game_id,
+        "ply": 1,
+        "side_to_move": "b",
+        "players": ["W", "B"],
+        "template_id": "t",
+        "confidence": 0.9,
+        "verified_by_human": True,
+    }
 
 
 def _write(root, recs):
@@ -118,8 +126,12 @@ def test_plan_splits_is_append_only():
     groups = {f"s{i}": f"s{i}" for i in range(10)}
     first = plan_splits(groups, ratio=SplitRatio(80, 20, 0), seed=0)
     # Grow: add 5 new singleton groups; old assignments must not move, new -> test.
-    grown = plan_splits({**groups, **{f"t{i}": f"t{i}" for i in range(5)}},
-                        ratio=SplitRatio(0, 0, 100), seed=0, existing=first)
+    grown = plan_splits(
+        {**groups, **{f"t{i}": f"t{i}" for i in range(5)}},
+        ratio=SplitRatio(0, 0, 100),
+        seed=0,
+        existing=first,
+    )
     assert all(grown[k] == first[k] for k in groups)  # nothing reshuffled
     assert all(grown[f"t{i}"] == "test" for i in range(5))
 
@@ -160,7 +172,11 @@ def test_plan_splits_append_only_keeps_a_group_together():
     # A game already in TRAIN must keep its *new* frames in TRAIN too (no leak on growth).
     groups = {f"g_a_{i}": "g_a" for i in range(3)}
     first = plan_splits(groups, ratio=SplitRatio(100, 0, 0), seed=0)
-    grown = plan_splits({**groups, "g_a_3": "g_a", "g_b_0": "g_b"},
-                        ratio=SplitRatio(0, 0, 100), seed=0, existing=first)
-    assert grown["g_a_3"] == "train"   # joins its game, not the new-frame ratio
-    assert grown["g_b_0"] == "test"    # genuinely new group follows the ratio
+    grown = plan_splits(
+        {**groups, "g_a_3": "g_a", "g_b_0": "g_b"},
+        ratio=SplitRatio(0, 0, 100),
+        seed=0,
+        existing=first,
+    )
+    assert grown["g_a_3"] == "train"  # joins its game, not the new-frame ratio
+    assert grown["g_b_0"] == "test"  # genuinely new group follows the ratio

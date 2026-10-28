@@ -15,7 +15,7 @@ from chessqueries.metrics.report import evaluation_inventory
 
 
 class _InventoryDataset(ChessDataset):
-    name = None
+    name = None  # ty: ignore[invalid-assignment]  # kept out of DATASET_REGISTRY
     splits = (Split.TEST,)
     expected_samples = {Split.TEST: 3}
 
